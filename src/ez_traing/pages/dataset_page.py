@@ -10,9 +10,10 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
+from collections import Counter
 
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QPixmap, QIcon, QImage
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QPainter, QBrush, QPen
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -26,6 +27,8 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QInputDialog,
     QMessageBox,
+    QScrollArea,
+    QGridLayout,
 )
 from qfluentwidgets import (
     PushButton,
@@ -36,6 +39,7 @@ from qfluentwidgets import (
     SubtitleLabel,
     TitleLabel,
     CaptionLabel,
+    StrongBodyLabel,
     FluentIcon as FIF,
     InfoBar,
     InfoBarPosition,
@@ -136,20 +140,101 @@ class ProjectManager:
         return list(self.projects.values())
 
 
+@dataclass
+class AnnotationStats:
+    """标注统计信息"""
+    total_images: int = 0
+    annotated_images: int = 0
+    unannotated_images: int = 0
+    total_objects: int = 0
+    label_counts: Dict[str, int] = field(default_factory=dict)
+    
+    @property
+    def annotation_rate(self) -> float:
+        """标注率"""
+        if self.total_images == 0:
+            return 0.0
+        return self.annotated_images / self.total_images * 100
+
+
 class ImageScanner(QThread):
     """异步图片扫描线程"""
     progress = pyqtSignal(int, int)  # current, total
-    finished = pyqtSignal(list, int)  # image_paths, annotated_count
+    finished = pyqtSignal(list, object)  # image_paths, AnnotationStats
     
-    def __init__(self, directory: str):
+    def __init__(self, directory: str, classes_file: str = None):
         super().__init__()
         self.directory = directory
+        self.classes_file = classes_file
         self._is_cancelled = False
+        self._class_names = []  # YOLO 类别名称列表
+    
+    def _load_classes(self):
+        """加载 YOLO classes.txt 文件"""
+        # 尝试多个可能的位置
+        possible_paths = [
+            Path(self.directory) / "classes.txt",
+            Path(self.directory) / "labels" / "classes.txt",
+            Path(self.directory) / ".." / "classes.txt",
+        ]
+        if self.classes_file:
+            possible_paths.insert(0, Path(self.classes_file))
+        
+        for path in possible_paths:
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        self._class_names = [line.strip() for line in f if line.strip()]
+                    return
+                except Exception:
+                    pass
+    
+    def _parse_yolo_annotation(self, txt_path: Path) -> List[str]:
+        """解析 YOLO 格式标注文件，返回标签列表"""
+        labels = []
+        try:
+            with open(txt_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 5:  # YOLO format: class_id x y w h
+                        try:
+                            class_id = int(parts[0])
+                            if self._class_names and 0 <= class_id < len(self._class_names):
+                                labels.append(self._class_names[class_id])
+                            else:
+                                labels.append(f"class_{class_id}")
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+        return labels
+    
+    def _parse_voc_annotation(self, xml_path: Path) -> List[str]:
+        """解析 VOC 格式标注文件，返回标签列表"""
+        labels = []
+        try:
+            import xml.etree.ElementTree as ET
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            for obj in root.findall("object"):
+                name = obj.find("name")
+                if name is not None and name.text:
+                    labels.append(name.text)
+        except Exception:
+            pass
+        return labels
     
     def run(self):
         image_paths = []
         all_files = []
-        annotated_count = 0
+        stats = AnnotationStats()
+        label_counter = Counter()
+        
+        # 加载类别名称
+        self._load_classes()
         
         # 收集所有文件
         for root, _, files in os.walk(self.directory):
@@ -158,19 +243,37 @@ class ImageScanner(QThread):
                     all_files.append(os.path.join(root, file))
         
         total = len(all_files)
+        stats.total_images = total
+        
         for i, file_path in enumerate(all_files):
             if self._is_cancelled:
                 break
             image_paths.append(file_path)
             
-            # 检查是否有标注
             path = Path(file_path)
-            if path.with_suffix(".txt").exists() or path.with_suffix(".xml").exists():
-                annotated_count += 1
+            labels = []
+            
+            # 检查 YOLO 格式标注 (.txt)
+            txt_path = path.with_suffix(".txt")
+            if txt_path.exists():
+                labels = self._parse_yolo_annotation(txt_path)
+            else:
+                # 检查 VOC 格式标注 (.xml)
+                xml_path = path.with_suffix(".xml")
+                if xml_path.exists():
+                    labels = self._parse_voc_annotation(xml_path)
+            
+            if labels:
+                stats.annotated_images += 1
+                stats.total_objects += len(labels)
+                label_counter.update(labels)
             
             self.progress.emit(i + 1, total)
         
-        self.finished.emit(image_paths, annotated_count)
+        stats.unannotated_images = stats.total_images - stats.annotated_images
+        stats.label_counts = dict(label_counter)
+        
+        self.finished.emit(image_paths, stats)
     
     def cancel(self):
         self._is_cancelled = True
@@ -330,6 +433,203 @@ class ProjectListWidget(CardWidget):
         project_id = item.data(Qt.UserRole)
         self.delete_btn.setEnabled(True)
         self.project_selected.emit(project_id)
+
+
+# 预设颜色列表（用于标签显示）
+LABEL_COLORS = [
+    "#2196F3", "#4CAF50", "#FF9800", "#E91E63", "#9C27B0",
+    "#00BCD4", "#FFEB3B", "#795548", "#607D8B", "#F44336",
+    "#3F51B5", "#8BC34A", "#FF5722", "#673AB7", "#009688",
+]
+
+
+class StatisticsPanel(CardWidget):
+    """标注统计面板"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(280)
+        self._stats: Optional[AnnotationStats] = None
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        
+        # 标题
+        title_label = SubtitleLabel("标注统计")
+        layout.addWidget(title_label)
+        
+        # 概览卡片
+        overview_card = QFrame()
+        overview_card.setStyleSheet("""
+            QFrame {
+                background-color: #f8f9fa;
+                border-radius: 8px;
+                padding: 8px;
+            }
+        """)
+        overview_layout = QGridLayout(overview_card)
+        overview_layout.setContentsMargins(12, 12, 12, 12)
+        overview_layout.setSpacing(8)
+        
+        # 总图片数
+        self.total_label = StrongBodyLabel("0")
+        self.total_label.setAlignment(Qt.AlignCenter)
+        overview_layout.addWidget(CaptionLabel("总图片"), 0, 0, Qt.AlignCenter)
+        overview_layout.addWidget(self.total_label, 1, 0, Qt.AlignCenter)
+        
+        # 已标注
+        self.annotated_label = StrongBodyLabel("0")
+        self.annotated_label.setAlignment(Qt.AlignCenter)
+        self.annotated_label.setStyleSheet("color: #4CAF50;")
+        overview_layout.addWidget(CaptionLabel("已标注"), 0, 1, Qt.AlignCenter)
+        overview_layout.addWidget(self.annotated_label, 1, 1, Qt.AlignCenter)
+        
+        # 未标注
+        self.unannotated_label = StrongBodyLabel("0")
+        self.unannotated_label.setAlignment(Qt.AlignCenter)
+        self.unannotated_label.setStyleSheet("color: #FF9800;")
+        overview_layout.addWidget(CaptionLabel("未标注"), 0, 2, Qt.AlignCenter)
+        overview_layout.addWidget(self.unannotated_label, 1, 2, Qt.AlignCenter)
+        
+        layout.addWidget(overview_card)
+        
+        # 标注率
+        rate_layout = QHBoxLayout()
+        rate_layout.addWidget(CaptionLabel("标注进度:"))
+        self.rate_label = BodyLabel("0%")
+        rate_layout.addWidget(self.rate_label)
+        rate_layout.addStretch()
+        layout.addLayout(rate_layout)
+        
+        # 进度条
+        self.rate_bar = ProgressBar()
+        self.rate_bar.setValue(0)
+        layout.addWidget(self.rate_bar)
+        
+        # 对象总数
+        objects_layout = QHBoxLayout()
+        objects_layout.addWidget(CaptionLabel("标注对象总数:"))
+        self.objects_label = BodyLabel("0")
+        objects_layout.addWidget(self.objects_label)
+        objects_layout.addStretch()
+        layout.addLayout(objects_layout)
+        
+        # 标签分布标题
+        labels_header = QHBoxLayout()
+        labels_header.addWidget(CaptionLabel("标签分布"))
+        labels_header.addStretch()
+        self.labels_count_label = CaptionLabel("0 种标签")
+        labels_header.addWidget(self.labels_count_label)
+        layout.addLayout(labels_header)
+        
+        # 标签列表（滚动区域）
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMaximumHeight(200)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #e0e0e0;
+                border-radius: 6px;
+                background-color: #ffffff;
+            }
+        """)
+        
+        self.labels_container = QWidget()
+        self.labels_layout = QVBoxLayout(self.labels_container)
+        self.labels_layout.setContentsMargins(8, 8, 8, 8)
+        self.labels_layout.setSpacing(6)
+        self.labels_layout.addStretch()
+        
+        scroll_area.setWidget(self.labels_container)
+        layout.addWidget(scroll_area, 1)
+    
+    def set_stats(self, stats: AnnotationStats):
+        """设置统计数据"""
+        self._stats = stats
+        
+        # 更新概览
+        self.total_label.setText(str(stats.total_images))
+        self.annotated_label.setText(str(stats.annotated_images))
+        self.unannotated_label.setText(str(stats.unannotated_images))
+        
+        # 更新标注率
+        rate = stats.annotation_rate
+        self.rate_label.setText(f"{rate:.1f}%")
+        self.rate_bar.setValue(int(rate))
+        
+        # 更新对象总数
+        self.objects_label.setText(str(stats.total_objects))
+        
+        # 更新标签分布
+        self._update_labels(stats.label_counts)
+    
+    def _update_labels(self, label_counts: Dict[str, int]):
+        """更新标签分布显示"""
+        # 清空现有标签
+        while self.labels_layout.count() > 1:  # 保留 stretch
+            item = self.labels_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        if not label_counts:
+            self.labels_count_label.setText("0 种标签")
+            no_label = CaptionLabel("暂无标签数据")
+            no_label.setStyleSheet("color: #999999;")
+            self.labels_layout.insertWidget(0, no_label)
+            return
+        
+        self.labels_count_label.setText(f"{len(label_counts)} 种标签")
+        
+        # 计算总数用于百分比
+        total = sum(label_counts.values())
+        
+        # 按数量排序
+        sorted_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        for i, (label, count) in enumerate(sorted_labels):
+            color = LABEL_COLORS[i % len(LABEL_COLORS)]
+            percentage = count / total * 100 if total > 0 else 0
+            
+            # 创建标签行
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            
+            # 颜色指示器
+            color_dot = QLabel()
+            color_dot.setFixedSize(12, 12)
+            color_dot.setStyleSheet(f"""
+                background-color: {color};
+                border-radius: 6px;
+            """)
+            row_layout.addWidget(color_dot)
+            
+            # 标签名
+            name_label = BodyLabel(label)
+            name_label.setStyleSheet("color: #333333;")
+            row_layout.addWidget(name_label, 1)
+            
+            # 数量和百分比
+            count_label = CaptionLabel(f"{count} ({percentage:.1f}%)")
+            count_label.setStyleSheet("color: #666666;")
+            row_layout.addWidget(count_label)
+            
+            self.labels_layout.insertWidget(self.labels_layout.count() - 1, row)
+    
+    def clear(self):
+        """清空统计"""
+        self._stats = None
+        self.total_label.setText("0")
+        self.annotated_label.setText("0")
+        self.unannotated_label.setText("0")
+        self.rate_label.setText("0%")
+        self.rate_bar.setValue(0)
+        self.objects_label.setText("0")
+        self._update_labels({})
 
 
 class ImagePreviewWidget(QFrame):
@@ -509,10 +809,12 @@ class ImageListPanel(CardWidget):
             QListWidget::item {
                 padding: 8px;
                 border-radius: 6px;
+                color: #333333;
             }
             QListWidget::item:selected {
                 background-color: #e3f2fd;
                 border: 2px solid #2196f3;
+                color: #1565c0;
             }
             QListWidget::item:hover {
                 background-color: #f5f5f5;
@@ -614,8 +916,8 @@ class ImageListPanel(CardWidget):
 class DatasetPage(QWidget):
     """数据集管理页面"""
     
-    # 信号：请求打开图片进行标注
-    request_annotation = pyqtSignal(str)  # image_path
+    # 信号：请求打开图片进行标注 (目录路径, 图片路径)
+    request_annotation = pyqtSignal(str, str)  # directory, image_path
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -658,12 +960,25 @@ class DatasetPage(QWidget):
         self.image_list_panel.image_double_clicked.connect(self._on_image_double_clicked)
         content_splitter.addWidget(self.image_list_panel)
         
-        # 右侧：预览区域
+        # 右侧：统计和预览（垂直分割）
+        right_splitter = QSplitter(Qt.Vertical)
+        
+        # 统计面板
+        self.statistics_panel = StatisticsPanel()
+        right_splitter.addWidget(self.statistics_panel)
+        
+        # 预览区域
         self.preview_widget = ImagePreviewWidget()
-        content_splitter.addWidget(self.preview_widget)
+        right_splitter.addWidget(self.preview_widget)
+        
+        right_splitter.setSizes([350, 350])
+        right_splitter.setStretchFactor(0, 1)
+        right_splitter.setStretchFactor(1, 1)
+        
+        content_splitter.addWidget(right_splitter)
         
         # 设置分割比例
-        content_splitter.setSizes([280, 500, 320])
+        content_splitter.setSizes([260, 500, 340])
         content_splitter.setStretchFactor(0, 0)
         content_splitter.setStretchFactor(1, 2)
         content_splitter.setStretchFactor(2, 1)
@@ -776,6 +1091,7 @@ class DatasetPage(QWidget):
                 self.image_paths.clear()
                 self.image_list_panel.clear()
                 self.preview_widget.set_image(None)
+                self.statistics_panel.clear()
                 self.refresh_btn.setEnabled(False)
                 self.annotate_btn.setEnabled(False)
                 self.status_label.setText("选择或创建数据集项目")
@@ -816,6 +1132,7 @@ class DatasetPage(QWidget):
         self.image_paths.clear()
         self.image_list_panel.clear()
         self.preview_widget.set_image(None)
+        self.statistics_panel.clear()
         
         # 检查目录是否存在
         if not os.path.isdir(project.directory):
@@ -849,15 +1166,18 @@ class DatasetPage(QWidget):
             self.progress_bar.setValue(int(current / total * 100))
         self.status_label.setText(f"正在扫描: {current}/{total}")
     
-    def _on_scan_finished(self, image_paths: List[str], annotated_count: int):
+    def _on_scan_finished(self, image_paths: List[str], stats: AnnotationStats):
         """扫描完成"""
         self.image_paths = sorted(image_paths)
         count = len(self.image_paths)
         
+        # 更新统计面板
+        self.statistics_panel.set_stats(stats)
+        
         # 更新项目信息
         if self.current_project:
             self.current_project.image_count = count
-            self.current_project.annotated_count = annotated_count
+            self.current_project.annotated_count = stats.annotated_images
             self.project_manager.update_project(self.current_project)
             self.project_list_widget.update_project_item(self.current_project)
         
@@ -930,9 +1250,7 @@ class DatasetPage(QWidget):
     
     def _open_for_annotation(self, image_path: str):
         """打开图片进行标注"""
-        if os.path.exists(image_path):
-            self.request_annotation.emit(image_path)
-        else:
+        if not os.path.exists(image_path):
             InfoBar.error(
                 title="错误",
                 content="图片文件不存在",
@@ -942,6 +1260,17 @@ class DatasetPage(QWidget):
                 duration=3000,
                 parent=self
             )
+            return
+        
+        # 获取项目目录
+        directory = ""
+        if self.current_project:
+            directory = self.current_project.directory
+        else:
+            # 如果没有项目，使用图片所在目录
+            directory = str(Path(image_path).parent)
+        
+        self.request_annotation.emit(directory, image_path)
     
     def get_selected_image_path(self) -> Optional[str]:
         """获取当前选中的图片路径"""

@@ -50,16 +50,24 @@ class AppWindow(FluentWindow):
         annotation_window = self._annotation_window()
         return getattr(annotation_window, "label_coordinates", None)
 
-    def _on_request_annotation(self, image_path: str):
-        """处理数据集页面的标注请求，跳转到标注页面并打开图片"""
+    def _on_request_annotation(self, directory: str, image_path: str):
+        """处理数据集页面的标注请求，跳转到标注页面并打开项目文件夹和图片"""
         if not image_path or not os.path.exists(image_path):
             return
 
         # 切换到标注页面
         self.switchTo(self.annotation_page)
 
-        # 打开图片进行标注
+        # 打开项目文件夹和图片进行标注
         annotation_window = self._annotation_window()
         if annotation_window:
-            # 使用 labelImg 的 load_file 方法加载图片
+            # 先导入整个目录的图片
+            if directory and os.path.isdir(directory):
+                # 检查是否需要重新加载目录（如果目录已经加载，避免重复加载）
+                current_dir = getattr(annotation_window, "dir_name", None)
+                if current_dir != directory:
+                    annotation_window.import_dir_images(directory)
+                    annotation_window.default_save_dir = directory
+            
+            # 然后加载指定的图片（会自动在列表中高亮定位）
             annotation_window.load_file(image_path)
