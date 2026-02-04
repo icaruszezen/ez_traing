@@ -1,0 +1,3 @@
+PyQt5>=5.15.2
+PyQt-Fluent-Widgets>=1.4.0
+lxml>=4.9.1

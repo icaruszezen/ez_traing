@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "FluentLabel",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/ez_traing/main.py",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe"
+    }
+  ]
+}
