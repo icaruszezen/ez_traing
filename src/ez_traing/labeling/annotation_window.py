@@ -9,12 +9,16 @@ from PyQt5.QtGui import QColor, QIcon, QPalette
 from PyQt5.QtWidgets import (
     QAction,
     QDialog,
+    QDockWidget,
     QHBoxLayout,
     QInputDialog,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -164,13 +168,72 @@ def _apply_fluent_stylesheet(widget):
 #fluentAnnotationWindow QDockWidget::title {{
     background-color: #F0F2F6;
     color: #1F1F1F;
+    padding: 7px 36px 8px 12px;
+    font-weight: 600;
+    border-bottom: 1px solid #E3E3E3;
+    min-height: 32px;
+}}
+#fluentAnnotationWindow QDockWidget::close-button,
+#fluentAnnotationWindow QDockWidget::float-button {{
+    border: 1px solid transparent;
+    border-radius: 4px;
+    subcontrol-position: top right;
+    margin: 6px;
+}}
+#fluentAnnotationWindow QDockWidget::close-button:hover,
+#fluentAnnotationWindow QDockWidget::float-button:hover {{
+    background-color: #E9EEF6;
+    border-color: #D6E4FF;
+}}
+#fluentAnnotationWindow #dockTitleBar {{
+    background-color: #F0F2F6;
+    border-bottom: 1px solid #E3E3E3;
+}}
+#fluentAnnotationWindow #dockTitleLabel {{
+    color: #1F1F1F;
+    font-weight: 600;
+    font-size: 14px;
+}}
+#fluentAnnotationWindow #dockTitleButton {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 2px;
+}}
+#fluentAnnotationWindow #dockTitleButton:hover {{
+    background-color: #E9EEF6;
+    border-color: #D6E4FF;
+}}
+#fluentAnnotationWindow #dockTitleButton:pressed {{
+    background-color: #DDEBFF;
+    border-color: #C4D8FF;
+}}
+#fluentAnnotationWindow #labelDockContainer,
+#fluentAnnotationWindow #fileDockContainer {{
+    background-color: transparent;
+    font-size: 13px;
+}}
+#fluentAnnotationWindow QFrame#panelSeparator {{
+    background-color: #E3E3E3;
+    border: none;
 }}
 #fluentAnnotationWindow QListWidget,
 #fluentAnnotationWindow QTreeView,
 #fluentAnnotationWindow QTableView {{
     background-color: #FFFFFF;
     border: 1px solid #E3E3E3;
+    border-radius: 6px;
     color: #1F1F1F;
+    outline: none;
+}}
+#fluentAnnotationWindow QListWidget::item {{
+    padding: 8px 12px;
+    margin: 2px 4px;
+    border-radius: 4px;
+    font-size: 13px;
+}}
+#fluentAnnotationWindow QListWidget::item:hover {{
+    background-color: #F5F7FA;
 }}
 #fluentAnnotationWindow QListWidget::item:selected,
 #fluentAnnotationWindow QTreeView::item:selected,
@@ -281,21 +344,109 @@ import labelImg as labelimg_module
 labelimg_module.__appname__ = "FluentLabel"
 
 
+FLUENT_PREDEFINED_DIALOG_STYLE = """
+PredefinedLabelsDialog {
+    background-color: #FCFCFC;
+    border: 1px solid #E5E5E5;
+    border-radius: 8px;
+}
+PredefinedLabelsDialog QLabel#titleLabel {
+    font-size: 18px;
+    font-weight: 600;
+    color: #1A1A1A;
+    padding: 4px 0;
+}
+PredefinedLabelsDialog QListWidget {
+    background-color: #FFFFFF;
+    border: 1px solid #E5E5E5;
+    border-radius: 6px;
+    padding: 4px;
+    outline: none;
+}
+PredefinedLabelsDialog QListWidget::item {
+    padding: 10px 12px;
+    border-radius: 4px;
+    color: #1A1A1A;
+    margin: 2px 4px;
+}
+PredefinedLabelsDialog QListWidget::item:hover {
+    background-color: #F5F5F5;
+}
+PredefinedLabelsDialog QListWidget::item:selected {
+    background-color: #E5F1FB;
+    color: #1A1A1A;
+}
+PredefinedLabelsDialog QListWidget::item:selected:hover {
+    background-color: #CCE4F7;
+}
+PredefinedLabelsDialog QPushButton {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D1D1;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-size: 13px;
+    color: #1A1A1A;
+    min-width: 70px;
+}
+PredefinedLabelsDialog QPushButton:hover {
+    background-color: #F5F5F5;
+    border-color: #C1C1C1;
+}
+PredefinedLabelsDialog QPushButton:pressed {
+    background-color: #E5E5E5;
+    border-color: #A0A0A0;
+}
+PredefinedLabelsDialog QPushButton#primaryBtn {
+    background-color: #0078D4;
+    border: 1px solid #0067B8;
+    color: #FFFFFF;
+}
+PredefinedLabelsDialog QPushButton#primaryBtn:hover {
+    background-color: #1084D9;
+    border-color: #0078D4;
+}
+PredefinedLabelsDialog QPushButton#primaryBtn:pressed {
+    background-color: #006CBD;
+    border-color: #005A9E;
+}
+PredefinedLabelsDialog QPushButton#dangerBtn {
+    color: #C42B1C;
+    border-color: #C42B1C;
+}
+PredefinedLabelsDialog QPushButton#dangerBtn:hover {
+    background-color: #FDF3F2;
+    border-color: #C42B1C;
+}
+PredefinedLabelsDialog QPushButton#dangerBtn:pressed {
+    background-color: #FCE4E1;
+}
+"""
+
+
 class PredefinedLabelsDialog(QDialog):
     """预设标签编辑对话框"""
 
     def __init__(self, parent, labels, classes_file):
         super().__init__(parent)
         self.setWindowTitle("编辑预设标签")
-        self.setMinimumSize(300, 400)
+        self.setMinimumSize(360, 450)
         self._labels = labels.copy()
         self._classes_file = classes_file
         self._setup_ui()
 
     def _setup_ui(self):
+        # 应用Fluent样式
+        self.setStyleSheet(FLUENT_PREDEFINED_DIALOG_STYLE)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        # 标题
+        from PyQt5.QtWidgets import QLabel
+        title_label = QLabel("编辑预设标签")
+        title_label.setObjectName("titleLabel")
+        layout.addWidget(title_label)
 
         # 标签列表
         self._list = QListWidget()
@@ -306,7 +457,7 @@ class PredefinedLabelsDialog(QDialog):
 
         # 按钮栏
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(4)
+        btn_layout.setSpacing(8)
 
         add_btn = QPushButton("添加")
         add_btn.clicked.connect(self._add_label)
@@ -317,20 +468,33 @@ class PredefinedLabelsDialog(QDialog):
         btn_layout.addWidget(edit_btn)
 
         delete_btn = QPushButton("删除")
+        delete_btn.setObjectName("dangerBtn")
         delete_btn.clicked.connect(self._delete_label)
         btn_layout.addWidget(delete_btn)
 
+        btn_layout.addStretch()
         layout.addLayout(btn_layout)
+
+        # 分隔线
+        separator = QWidget()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet("background-color: #E5E5E5;")
+        layout.addWidget(separator)
 
         # 底部按钮
         bottom_layout = QHBoxLayout()
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(self._save_and_close)
+        bottom_layout.setSpacing(8)
+        bottom_layout.addStretch()
+
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
-        bottom_layout.addStretch()
-        bottom_layout.addWidget(save_btn)
         bottom_layout.addWidget(cancel_btn)
+
+        save_btn = QPushButton("保存")
+        save_btn.setObjectName("primaryBtn")
+        save_btn.clicked.connect(self._save_and_close)
+        bottom_layout.addWidget(save_btn)
+
         layout.addLayout(bottom_layout)
 
     def _refresh_list(self):
@@ -426,7 +590,52 @@ class AnnotationWindow(labelimg_module.MainWindow):
             self.setWindowFlags(Qt.Widget)
 
         _apply_fluent_style(self)
+        self._setup_dock_title_bars()
         self._setup_edit_labels_menu()
+
+    def _setup_dock_title_bars(self):
+        """自定义右侧 Dock 标题栏，避免文字裁切"""
+        if hasattr(self, "dock"):
+            self._apply_dock_title_bar(self.dock, show_float=False)
+        if hasattr(self, "file_dock"):
+            self._apply_dock_title_bar(self.file_dock, show_float=True)
+
+    def _apply_dock_title_bar(self, dock, show_float=False):
+        title_bar = QWidget(dock)
+        title_bar.setObjectName("dockTitleBar")
+        title_bar.setAttribute(Qt.WA_StyledBackground, True)
+        title_bar.setMinimumHeight(32)
+
+        layout = QHBoxLayout(title_bar)
+        layout.setContentsMargins(12, 6, 8, 6)
+        layout.setSpacing(6)
+
+        title_label = QLabel(dock.windowTitle(), title_bar)
+        title_label.setObjectName("dockTitleLabel")
+        title_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        layout.addWidget(title_label)
+        layout.addStretch()
+
+        if show_float and (dock.features() & QDockWidget.DockWidgetFloatable):
+            float_btn = QToolButton(title_bar)
+            float_btn.setObjectName("dockTitleButton")
+            float_btn.setAutoRaise(True)
+            float_btn.setToolTip("浮动/停靠")
+            float_btn.clicked.connect(lambda: dock.setFloating(not dock.isFloating()))
+            layout.addWidget(float_btn)
+
+            dock.topLevelChanged.connect(
+                lambda floating, btn=float_btn, d=dock: self._update_dock_float_icon(btn, d, floating)
+            )
+            self._update_dock_float_icon(float_btn, dock, dock.isFloating())
+
+        dock.setTitleBarWidget(title_bar)
+
+    def _update_dock_float_icon(self, button, dock, floating):
+        icon = dock.style().standardIcon(
+            QStyle.SP_TitleBarNormalButton if floating else QStyle.SP_TitleBarMaxButton
+        )
+        button.setIcon(icon)
 
     def _setup_edit_labels_menu(self):
         """在编辑菜单中添加预设标签编辑项"""

@@ -10,42 +10,185 @@ from libs.utils import new_icon, label_validator, trimmed
 
 BB = QDialogButtonBox
 
+# Fluent Design 样式表
+FLUENT_DIALOG_STYLE = """
+LabelDialog {
+    background-color: #FCFCFC;
+    border: 1px solid #E5E5E5;
+    border-radius: 8px;
+}
+LabelDialog QLineEdit {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D1D1;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 14px;
+    color: #1A1A1A;
+    selection-background-color: #0078D4;
+    selection-color: #FFFFFF;
+}
+LabelDialog QLineEdit:focus {
+    border: 1px solid #0078D4;
+    border-bottom: 2px solid #0078D4;
+}
+LabelDialog QLineEdit:hover:!focus {
+    border-color: #A0A0A0;
+}
+LabelDialog QListWidget {
+    background-color: #FFFFFF;
+    border: 1px solid #E5E5E5;
+    border-radius: 6px;
+    padding: 4px;
+    outline: none;
+}
+LabelDialog QListWidget::item {
+    padding: 8px 12px;
+    border-radius: 4px;
+    color: #1A1A1A;
+    margin: 2px 4px;
+}
+LabelDialog QListWidget::item:hover {
+    background-color: #F5F5F5;
+}
+LabelDialog QListWidget::item:selected {
+    background-color: #E5F1FB;
+    color: #1A1A1A;
+}
+LabelDialog QListWidget::item:selected:hover {
+    background-color: #CCE4F7;
+}
+LabelDialog QPushButton {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D1D1;
+    border-radius: 4px;
+    padding: 6px 16px;
+    font-size: 13px;
+    color: #1A1A1A;
+    min-width: 70px;
+}
+LabelDialog QPushButton:hover {
+    background-color: #F5F5F5;
+    border-color: #C1C1C1;
+}
+LabelDialog QPushButton:pressed {
+    background-color: #E5E5E5;
+    border-color: #A0A0A0;
+}
+LabelDialog QPushButton:default, LabelDialog QPushButton[default="true"] {
+    background-color: #0078D4;
+    border: 1px solid #0067B8;
+    color: #FFFFFF;
+}
+LabelDialog QPushButton:default:hover, LabelDialog QPushButton[default="true"]:hover {
+    background-color: #1084D9;
+    border-color: #0078D4;
+}
+LabelDialog QPushButton:default:pressed, LabelDialog QPushButton[default="true"]:pressed {
+    background-color: #006CBD;
+    border-color: #005A9E;
+}
+LabelDialog QDialogButtonBox {
+    dialogbuttonbox-buttons-have-icons: 0;
+}
+"""
+
 
 class LabelDialog(QDialog):
 
     def __init__(self, text="Enter object label", parent=None, list_item=None):
         super(LabelDialog, self).__init__(parent)
 
+        # 应用Fluent样式
+        self.setStyleSheet(FLUENT_DIALOG_STYLE)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+
+        # 主布局
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # 标题标签
+        title_label = QLabel("选择标签")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 16px;
+                font-weight: 600;
+                color: #1A1A1A;
+                padding-bottom: 4px;
+            }
+        """)
+        layout.addWidget(title_label)
+
+        # 输入框
         self.edit = QLineEdit()
-        self.edit.setText(text)
+        self.edit.setPlaceholderText("输入或搜索标签...")
+        self.edit.setText(text if text != "Enter object label" else "")
         self.edit.setValidator(label_validator())
         self.edit.editingFinished.connect(self.post_process)
-
-        model = QStringListModel()
-        model.setStringList(list_item)
-        completer = QCompleter()
-        completer.setModel(model)
-        self.edit.setCompleter(completer)
-
-        self.button_box = bb = BB(BB.Ok | BB.Cancel, Qt.Horizontal, self)
-        bb.button(BB.Ok).setIcon(new_icon('done'))
-        bb.button(BB.Cancel).setIcon(new_icon('undo'))
-        bb.accepted.connect(self.validate)
-        bb.rejected.connect(self.reject)
-
-        layout = QVBoxLayout()
-        layout.addWidget(bb, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.edit.setMinimumHeight(36)
         layout.addWidget(self.edit)
 
+        # 自动补全
+        if list_item:
+            model = QStringListModel()
+            model.setStringList(list_item)
+            completer = QCompleter()
+            completer.setModel(model)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            self.edit.setCompleter(completer)
+
+        # 标签列表
         if list_item is not None and len(list_item) > 0:
             self.list_widget = QListWidget(self)
+            self.list_widget.setMinimumHeight(150)
+            self.list_widget.setMaximumHeight(250)
             for item in list_item:
                 self.list_widget.addItem(item)
             self.list_widget.itemClicked.connect(self.list_item_click)
             self.list_widget.itemDoubleClicked.connect(self.list_item_double_click)
             layout.addWidget(self.list_widget)
 
+            # 搜索过滤功能
+            self.edit.textChanged.connect(self._filter_list)
+            self._all_items = list_item
+
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+        btn_layout.addStretch()
+
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+
+        self.ok_btn = QPushButton("确定")
+        self.ok_btn.setDefault(True)
+        self.ok_btn.setProperty("default", True)
+        self.ok_btn.clicked.connect(self.validate)
+        btn_layout.addWidget(self.ok_btn)
+
+        layout.addLayout(btn_layout)
+
+        # 保留旧的button_box引用以兼容pop_up方法
+        self.button_box = BB(BB.Ok | BB.Cancel, Qt.Horizontal, self)
+        self.button_box.hide()
+        self.button_box.accepted.connect(self.validate)
+        self.button_box.rejected.connect(self.reject)
+
         self.setLayout(layout)
+        self.setMinimumWidth(320)
+
+    def _filter_list(self, text):
+        """根据输入过滤标签列表"""
+        if not hasattr(self, 'list_widget') or not hasattr(self, '_all_items'):
+            return
+        search_text = text.lower()
+        self.list_widget.clear()
+        for item in self._all_items:
+            if search_text in item.lower():
+                self.list_widget.addItem(item)
 
     def validate(self):
         if trimmed(self.edit.text()):
@@ -63,26 +206,35 @@ class LabelDialog(QDialog):
         self.edit.setText(text)
         self.edit.setSelection(0, len(text))
         self.edit.setFocus(Qt.PopupFocusReason)
+
+        # 重置列表过滤
+        if hasattr(self, 'list_widget') and hasattr(self, '_all_items'):
+            self.list_widget.clear()
+            for item in self._all_items:
+                self.list_widget.addItem(item)
+
         if move:
             cursor_pos = QCursor.pos()
-
-            # move OK button below cursor
-            btn = self.button_box.buttons()[0]
             self.adjustSize()
+
+            # 使用新的确定按钮进行定位
+            btn = self.ok_btn
             btn.adjustSize()
             offset = btn.mapToGlobal(btn.pos()) - self.pos()
             offset += QPoint(btn.size().width() // 4, btn.size().height() // 2)
             cursor_pos.setX(max(0, cursor_pos.x() - offset.x()))
             cursor_pos.setY(max(0, cursor_pos.y() - offset.y()))
 
-            parent_bottom_right = self.parentWidget().geometry()
-            max_x = parent_bottom_right.x() + parent_bottom_right.width() - self.sizeHint().width()
-            max_y = parent_bottom_right.y() + parent_bottom_right.height() - self.sizeHint().height()
-            max_global = self.parentWidget().mapToGlobal(QPoint(max_x, max_y))
-            if cursor_pos.x() > max_global.x():
-                cursor_pos.setX(max_global.x())
-            if cursor_pos.y() > max_global.y():
-                cursor_pos.setY(max_global.y())
+            parent = self.parentWidget()
+            if parent:
+                parent_bottom_right = parent.geometry()
+                max_x = parent_bottom_right.x() + parent_bottom_right.width() - self.sizeHint().width()
+                max_y = parent_bottom_right.y() + parent_bottom_right.height() - self.sizeHint().height()
+                max_global = parent.mapToGlobal(QPoint(max_x, max_y))
+                if cursor_pos.x() > max_global.x():
+                    cursor_pos.setX(max_global.x())
+                if cursor_pos.y() > max_global.y():
+                    cursor_pos.setY(max_global.y())
             self.move(cursor_pos)
         return trimmed(self.edit.text()) if self.exec_() else None
 

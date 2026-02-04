@@ -123,7 +123,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.prev_label_text = ''
 
         list_layout = QVBoxLayout()
-        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_layout.setContentsMargins(12, 12, 12, 12)
+        list_layout.setSpacing(8)
 
         # Create a widget for using default label
         self.use_default_label_checkbox = QCheckBox(get_str('useDefaultLabel'))
@@ -131,6 +132,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.default_label_combo_box = DefaultLabelComboBox(self,items=self.label_hist)
 
         use_default_label_qhbox_layout = QHBoxLayout()
+        use_default_label_qhbox_layout.setContentsMargins(0, 0, 0, 0)
+        use_default_label_qhbox_layout.setSpacing(6)
         use_default_label_qhbox_layout.addWidget(self.use_default_label_checkbox)
         use_default_label_qhbox_layout.addWidget(self.default_label_combo_box)
         use_default_label_container = QWidget()
@@ -150,17 +153,26 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Create and add combobox for showing unique labels in group
         self.combo_box = ComboBox(self)
+        self.combo_box.setObjectName("labelGroupCombo")
         list_layout.addWidget(self.combo_box)
 
         # Create and add a widget for showing current label items
         self.label_list = QListWidget()
+        self.label_list.setObjectName("labelList")
+        self.label_list.setSpacing(4)
+        self.label_list.setUniformItemSizes(True)
         label_list_container = QWidget()
+        label_list_container.setObjectName("labelDockContainer")
         label_list_container.setLayout(list_layout)
         self.label_list.itemActivated.connect(self.label_selection_changed)
         self.label_list.itemSelectionChanged.connect(self.label_selection_changed)
         self.label_list.itemDoubleClicked.connect(self.edit_label)
         # Connect to itemChanged to detect checkbox changes.
         self.label_list.itemChanged.connect(self.label_item_changed)
+        separator = QFrame()
+        separator.setObjectName("panelSeparator")
+        separator.setFixedHeight(1)
+        list_layout.addWidget(separator)
         list_layout.addWidget(self.label_list)
 
 
@@ -170,11 +182,16 @@ class MainWindow(QMainWindow, WindowMixin):
         self.dock.setWidget(label_list_container)
 
         self.file_list_widget = QListWidget()
+        self.file_list_widget.setObjectName("fileList")
+        self.file_list_widget.setSpacing(4)
+        self.file_list_widget.setUniformItemSizes(True)
         self.file_list_widget.itemDoubleClicked.connect(self.file_item_double_clicked)
         file_list_layout = QVBoxLayout()
-        file_list_layout.setContentsMargins(0, 0, 0, 0)
+        file_list_layout.setContentsMargins(12, 12, 12, 12)
+        file_list_layout.setSpacing(8)
         file_list_layout.addWidget(self.file_list_widget)
         file_list_container = QWidget()
+        file_list_container.setObjectName("fileDockContainer")
         file_list_container.setLayout(file_list_layout)
         self.file_dock = QDockWidget(get_str('fileList'), self)
         self.file_dock.setObjectName(get_str('files'))
