@@ -781,8 +781,17 @@ class MainWindow(QMainWindow, WindowMixin):
 
     # Tzutalin 20160906 : Add file list and dock to move faster
     def file_item_double_clicked(self, item=None):
-        self.cur_img_idx = self.m_img_list.index(ustr(item.text()))
-        filename = self.m_img_list[self.cur_img_idx]
+        if item is None:
+            return
+        file_path = item.data(Qt.UserRole)
+        if not file_path:
+            file_path = ustr(item.text())
+        file_path = ustr(file_path)
+        if file_path in self.m_img_list:
+            self.cur_img_idx = self.m_img_list.index(file_path)
+        else:
+            self.cur_img_idx = self.file_list_widget.row(item)
+        filename = self.m_img_list[self.cur_img_idx] if self.m_img_list else file_path
         if filename:
             self.load_file(filename)
 
@@ -1390,7 +1399,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.img_count = len(self.m_img_list)
         self.open_next_image()
         for imgPath in self.m_img_list:
-            item = QListWidgetItem(imgPath)
+            item = QListWidgetItem(os.path.basename(imgPath))
+            item.setData(Qt.UserRole, imgPath)
             self.file_list_widget.addItem(item)
 
     def verify_image(self, _value=False):

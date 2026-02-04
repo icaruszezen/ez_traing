@@ -4,7 +4,7 @@ import sys
 import types
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QRect, QSize, QEvent
+from PyQt5.QtCore import Qt, QRect, QSize, QEvent, QPointF
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette
 from PyQt5.QtWidgets import (
     QAction,
@@ -209,7 +209,7 @@ def _apply_fluent_stylesheet(widget):
 #fluentAnnotationWindow #labelDockContainer,
 #fluentAnnotationWindow #fileDockContainer {{
     background-color: transparent;
-    font-size: 13px;
+    font-size: 10px;
 }}
 #fluentAnnotationWindow QFrame#panelSeparator {{
     background-color: #E3E3E3;
@@ -229,6 +229,12 @@ def _apply_fluent_stylesheet(widget):
     margin: 2px 4px;
     border-radius: 4px;
     font-size: 13px;
+}}
+#fluentAnnotationWindow #labelDockContainer QListWidget::item,
+#fluentAnnotationWindow #fileDockContainer QListWidget::item {{
+    padding: 4px 8px;
+    margin: 1px 2px;
+    font-size: 12px;
 }}
 #fluentAnnotationWindow QListWidget::item:hover {{
     background-color: #F5F7FA;
@@ -622,9 +628,13 @@ class AnnotationWindow(labelimg_module.MainWindow):
             self.setParent(parent)
             self.setWindowFlags(Qt.Widget)
 
+        self._copied_shapes = None
+
         _apply_fluent_style(self)
         self._setup_dock_title_bars()
+        self._compact_right_dock_lists()
         self._setup_edit_labels_menu()
+        self._setup_copy_annotations_menu()
 
     def _setup_dock_title_bars(self):
         """自定义右侧 Dock 标题栏，避免文字裁切"""
@@ -632,6 +642,13 @@ class AnnotationWindow(labelimg_module.MainWindow):
             self._apply_dock_title_bar(self.dock, show_float=False)
         if hasattr(self, "file_dock"):
             self._apply_dock_title_bar(self.file_dock, show_float=True)
+
+    def _compact_right_dock_lists(self):
+        """紧凑化右侧标注/文件列表的行间距"""
+        for list_widget in (getattr(self, "label_list", None), getattr(self, "file_list_widget", None)):
+            if list_widget is None:
+                continue
+            list_widget.setSpacing(2)
 
     def _apply_dock_title_bar(self, dock, show_float=False):
         title_bar = QWidget(dock)
@@ -675,10 +692,152 @@ class AnnotationWindow(labelimg_module.MainWindow):
         edit_labels_action = QAction(_new_icon("labels"), "编辑预设标签...", self)
         edit_labels_action.triggered.connect(self._open_predefined_labels_dialog)
 
-        # 在编辑菜单中添加分隔符和菜单项
+        self._extend_edit_menu_actions([edit_labels_action])
+
+    def _setup_copy_annotations_menu(self):
+        """在编辑菜单中添加复制/粘贴标注项"""
+        copy_action = QAction(_new_icon("copy"), "复制当前图片标注", self)
+        copy_action.setShortcut("Ctrl+Shift+C")
+        copy_action.setStatusTip("复制当前图片的全部标注框")
+        copy_action.triggered.connect(self._copy_current_annotations)
+
+        paste_action = QAction(_new_icon("paste"), "粘贴标注到当前图片", self)
+        paste_action.setShortcut("Ctrl+Shift+V")
+        paste_action.setStatusTip("将复制的标注框粘贴到当前图片")
+        paste_action.triggered.connect(self._paste_copied_annotations)
+
+        self._copy_annotations_action = copy_action
+        self._paste_annotations_action = paste_action
+        self._extend_edit_menu_actions([copy_action, paste_action])
+        self._extend_tools_actions([copy_action, paste_action])
+
+    def _extend_edit_menu_actions(self, actions):
+        """将自定义 action 插入编辑菜单，确保模式切换后仍保留"""
+        if hasattr(self, "actions") and hasattr(self.actions, "editMenu"):
+            edit_menu = list(self.actions.editMenu)
+            edit_menu.append(None)
+            edit_menu.extend(actions)
+            self.actions.editMenu = tuple(edit_menu)
+            self.populate_mode_actions()
+            return
+
         if hasattr(self, "menus") and hasattr(self.menus, "edit"):
             self.menus.edit.addSeparator()
-            self.menus.edit.addAction(edit_labels_action)
+            for action in actions:
+                self.menus.edit.addAction(action)
+
+    def _extend_tools_actions(self, actions):
+        """将自定义 action 插入左侧工具栏，确保模式切换后仍保留"""
+        if not hasattr(self, "actions"):
+            return
+
+        def insert_after(marker, target_actions):
+            filtered = [action for action in actions if action not in target_actions]
+            if not filtered:
+                return target_actions
+            try:
+                index = target_actions.index(marker)
+            except ValueError:
+                return target_actions + filtered
+            return target_actions[: index + 1] + filtered + target_actions[index + 1 :]
+
+        if hasattr(self.actions, "beginner"):
+            beginner_actions = list(self.actions.beginner)
+            beginner_actions = insert_after(self.actions.save_format, beginner_actions)
+            self.actions.beginner = tuple(beginner_actions)
+
+        if hasattr(self.actions, "advanced"):
+            advanced_actions = list(self.actions.advanced)
+            advanced_actions = insert_after(self.actions.save_format, advanced_actions)
+            self.actions.advanced = tuple(advanced_actions)
+
+        self.populate_mode_actions()
+
+    def _copy_current_annotations(self):
+        if not getattr(self, "file_path", None):
+            self.status("未打开图片，无法复制标注")
+            return
+
+        shapes_snapshot = self._snapshot_current_shapes()
+        if not shapes_snapshot:
+            self._copied_shapes = []
+            self.status("当前图片没有标注框")
+            return
+
+        self._copied_shapes = shapes_snapshot
+        self.status(f"已复制 {len(shapes_snapshot)} 个标注框")
+
+    def _paste_copied_annotations(self):
+        if not getattr(self, "file_path", None):
+            self.status("未打开图片，无法粘贴标注")
+            return
+
+        if not self._copied_shapes:
+            self.status("没有可粘贴的标注，请先复制")
+            return
+
+        pasted = 0
+        snapped_any = False
+        for snapshot in self._copied_shapes:
+            shape, snapped = self._shape_from_snapshot(snapshot)
+            if shape is None:
+                continue
+            snapped_any = snapped_any or snapped
+            self.add_label(shape)
+            self.canvas.shapes.append(shape)
+            pasted += 1
+
+        if pasted:
+            self.canvas.update()
+            self.set_dirty()
+            if snapped_any:
+                self.status(f"已粘贴 {pasted} 个标注框（部分超出边界已自动调整）")
+            else:
+                self.status(f"已粘贴 {pasted} 个标注框")
+        else:
+            self.status("粘贴失败：未生成有效标注框")
+
+    def _snapshot_current_shapes(self):
+        snapshots = []
+        for shape in getattr(self.canvas, "shapes", []):
+            points = [(p.x(), p.y()) for p in shape.points]
+            snapshots.append(
+                {
+                    "label": shape.label,
+                    "points": points,
+                    "line_color": shape.line_color.getRgb() if hasattr(shape, "line_color") else None,
+                    "fill_color": shape.fill_color.getRgb() if hasattr(shape, "fill_color") else None,
+                    "difficult": bool(getattr(shape, "difficult", False)),
+                    "fill": bool(getattr(shape, "fill", False)),
+                }
+            )
+        return snapshots
+
+    def _shape_from_snapshot(self, snapshot):
+        label = snapshot.get("label")
+        points = snapshot.get("points") or []
+        if not label or len(points) < 2:
+            return None, False
+
+        shape = labelimg_module.Shape(label=label)
+        snapped_any = False
+        for x, y in points:
+            x, y, snapped = self.canvas.snap_point_to_canvas(x, y)
+            snapped_any = snapped_any or snapped
+            shape.add_point(QPointF(x, y))
+
+        shape.difficult = bool(snapshot.get("difficult", False))
+        shape.fill = bool(snapshot.get("fill", False))
+        shape.close()
+
+        line_color = snapshot.get("line_color")
+        if line_color:
+            shape.line_color = QColor(*line_color)
+        fill_color = snapshot.get("fill_color")
+        if fill_color:
+            shape.fill_color = QColor(*fill_color)
+
+        return shape, snapped_any
 
     def _open_predefined_labels_dialog(self):
         """打开预设标签编辑对话框"""
