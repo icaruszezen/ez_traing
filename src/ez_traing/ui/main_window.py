@@ -6,6 +6,7 @@ from qfluentwidgets import FluentWindow, NavigationItemPosition
 from ez_traing.pages.annotation_page import AnnotationPage
 from ez_traing.pages.dataset_page import DatasetPage
 from ez_traing.pages.placeholder_page import PlaceholderPage
+from ez_traing.pages.prelabeling_page import PrelabelingPage
 from ez_traing.pages.settings_page import SettingsPage
 from ez_traing.pages.train_page import TrainPage
 
@@ -19,18 +20,21 @@ class AppWindow(FluentWindow):
         self.annotation_page = AnnotationPage(self)
         self.dataset_page = DatasetPage(self)
         self.train_page = TrainPage(self)
+        self.prelabeling_page = PrelabelingPage(self)
         self.eval_page = PlaceholderPage("模型验证", "页面预留，后续开发。", self)
         self.settings_page = SettingsPage(self)
 
         self.annotation_page.setObjectName("annotation")
         self.dataset_page.setObjectName("dataset")
         self.train_page.setObjectName("train")
+        self.prelabeling_page.setObjectName("prelabeling")
         self.eval_page.setObjectName("eval")
         self.settings_page.setObjectName("settings")
 
         self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
+        self.addSubInterface(self.prelabeling_page, FIF.TAG, "预标注")
         self.addSubInterface(
             self.eval_page,
             FIF.COMPLETED,
@@ -43,6 +47,9 @@ class AppWindow(FluentWindow):
             "设置",
             NavigationItemPosition.BOTTOM,
         )
+
+        # 共享 ProjectManager 给预标注页面
+        self.prelabeling_page.set_project_manager(self.dataset_page.project_manager)
 
         # 连接数据集页面的标注联动信号
         self.dataset_page.request_annotation.connect(self._on_request_annotation)
@@ -81,3 +88,5 @@ class AppWindow(FluentWindow):
             
             # 然后加载指定的图片（会自动在列表中高亮定位）
             annotation_window.load_file(image_path)
+
+

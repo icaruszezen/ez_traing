@@ -46,8 +46,7 @@ from qfluentwidgets import (
     ProgressBar,
 )
 
-# 支持的图片格式
-SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff", ".tif"}
+from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 
 # 项目配置文件路径
 def _get_config_dir() -> Path:
