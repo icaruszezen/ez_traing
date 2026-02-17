@@ -4,6 +4,7 @@ from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import FluentWindow, NavigationItemPosition
 
 from ez_traing.pages.annotation_page import AnnotationPage
+from ez_traing.pages.data_prep_page import DataPrepPage
 from ez_traing.pages.dataset_page import DatasetPage
 from ez_traing.pages.eval_page import EvalPage
 from ez_traing.pages.prelabeling_page import PrelabelingPage
@@ -19,6 +20,7 @@ class AppWindow(FluentWindow):
 
         self.annotation_page = AnnotationPage(self)
         self.dataset_page = DatasetPage(self)
+        self.data_prep_page = DataPrepPage(self)
         self.train_page = TrainPage(self)
         self.prelabeling_page = PrelabelingPage(self)
         self.eval_page = EvalPage(self)
@@ -26,21 +28,18 @@ class AppWindow(FluentWindow):
 
         self.annotation_page.setObjectName("annotation")
         self.dataset_page.setObjectName("dataset")
+        self.data_prep_page.setObjectName("data_prep")
         self.train_page.setObjectName("train")
         self.prelabeling_page.setObjectName("prelabeling")
         self.eval_page.setObjectName("eval")
         self.settings_page.setObjectName("settings")
 
-        self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
-        self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
+        self.addSubInterface(self.data_prep_page, FIF.DOCUMENT, "数据准备")
         self.addSubInterface(self.prelabeling_page, FIF.TAG, "预标注")
-        self.addSubInterface(
-            self.eval_page,
-            FIF.COMPLETED,
-            "验证",
-            NavigationItemPosition.BOTTOM,
-        )
+        self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
+        self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
+        self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
         self.addSubInterface(
             self.settings_page,
             FIF.SETTING,
@@ -50,6 +49,8 @@ class AppWindow(FluentWindow):
 
         # 共享 ProjectManager 给预标注页面
         self.prelabeling_page.set_project_manager(self.dataset_page.project_manager)
+        # 共享 ProjectManager 给数据准备页面
+        self.data_prep_page.set_project_manager(self.dataset_page.project_manager)
 
         # 连接数据集页面的标注联动信号
         self.dataset_page.request_annotation.connect(self._on_request_annotation)

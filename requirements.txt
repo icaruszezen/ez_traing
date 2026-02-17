@@ -4,3 +4,4 @@ lxml>=4.9.1
 ultralytics>=8.0.0
 PyYAML>=6.0
 matplotlib>=3.7.0
+albumentations>=1.4.0
