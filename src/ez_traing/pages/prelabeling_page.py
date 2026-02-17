@@ -290,7 +290,7 @@ class PrelabelingPage(QWidget):
         self._current_project_id: Optional[str] = None
         self._project_ids: List[str] = []
         self._detection_mode: DetectionMode = DetectionMode.TEXT_ONLY
-        self._inference_backend: InferenceBackend = InferenceBackend.VISION_API
+        self._inference_backend: InferenceBackend = InferenceBackend.YOLO_PT
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -446,7 +446,7 @@ class PrelabelingPage(QWidget):
         self.inference_backend_combo = ComboBox(card)
         self.inference_backend_combo.addItem("视觉 API")
         self.inference_backend_combo.addItem("本地 YOLO (.pt)")
-        self.inference_backend_combo.setCurrentIndex(0)
+        self.inference_backend_combo.setCurrentIndex(1)
         self.inference_backend_combo.currentIndexChanged.connect(
             self._on_inference_backend_changed
         )

@@ -5,7 +5,7 @@ from qfluentwidgets import FluentWindow, NavigationItemPosition
 
 from ez_traing.pages.annotation_page import AnnotationPage
 from ez_traing.pages.dataset_page import DatasetPage
-from ez_traing.pages.placeholder_page import PlaceholderPage
+from ez_traing.pages.eval_page import EvalPage
 from ez_traing.pages.prelabeling_page import PrelabelingPage
 from ez_traing.pages.settings_page import SettingsPage
 from ez_traing.pages.train_page import TrainPage
@@ -21,7 +21,7 @@ class AppWindow(FluentWindow):
         self.dataset_page = DatasetPage(self)
         self.train_page = TrainPage(self)
         self.prelabeling_page = PrelabelingPage(self)
-        self.eval_page = PlaceholderPage("模型验证", "页面预留，后续开发。", self)
+        self.eval_page = EvalPage(self)
         self.settings_page = SettingsPage(self)
 
         self.annotation_page.setObjectName("annotation")
