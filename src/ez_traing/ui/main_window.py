@@ -10,7 +10,9 @@ from ez_traing.pages.data_prep_page import DataPrepPage
 from ez_traing.pages.dataset_page import DatasetPage
 from ez_traing.pages.eval_page import EvalPage
 from ez_traing.pages.prelabeling_page import PrelabelingPage
+from ez_traing.pages.script_annotation_page import ScriptAnnotationPage
 from ez_traing.pages.settings_page import SettingsPage
+from ez_traing.pages.template_matching_page import TemplateMatchingPage
 from ez_traing.pages.train_page import TrainPage
 
 
@@ -46,11 +48,15 @@ class AppWindow(FluentWindow):
         self.prelabeling_page = PrelabelingPage(self)
         self._annotation_page = None
         self._batch_annotation_page = None
+        self._template_matching_page = None
+        self._script_annotation_page = None
         self._train_page = None
         self._eval_page = None
         self._settings_page = None
         self.annotation_page = LazyPageHost(self._create_annotation_page, self)
         self.batch_annotation_page = LazyPageHost(self._create_batch_annotation_page, self)
+        self.template_matching_page = LazyPageHost(self._create_template_matching_page, self)
+        self.script_annotation_page = LazyPageHost(self._create_script_annotation_page, self)
         self.train_page = LazyPageHost(self._create_train_page, self)
         self.eval_page = LazyPageHost(self._create_eval_page, self)
         self.settings_page = LazyPageHost(self._create_settings_page, self)
@@ -59,6 +65,8 @@ class AppWindow(FluentWindow):
         self.batch_annotation_page.setObjectName("batch_annotation")
         self.dataset_page.setObjectName("dataset")
         self.data_prep_page.setObjectName("data_prep")
+        self.template_matching_page.setObjectName("template_matching")
+        self.script_annotation_page.setObjectName("script_annotation")
         self.train_page.setObjectName("train")
         self.prelabeling_page.setObjectName("prelabeling")
         self.eval_page.setObjectName("eval")
@@ -68,7 +76,9 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.prelabeling_page, FIF.TAG, "预标注")
         self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
         self.addSubInterface(self.batch_annotation_page, FIF.COPY, "批量标注")
+        self.addSubInterface(self.template_matching_page, FIF.SEARCH, "模板匹配")
         self.addSubInterface(self.data_prep_page, FIF.DOCUMENT, "数据准备")
+        self.addSubInterface(self.script_annotation_page, FIF.DOCUMENT, "脚本标注")
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
         self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
         self.addSubInterface(
@@ -98,6 +108,22 @@ class AppWindow(FluentWindow):
                 self.dataset_page.project_manager
             )
         return self._batch_annotation_page
+
+    def _create_template_matching_page(self):
+        if self._template_matching_page is None:
+            self._template_matching_page = TemplateMatchingPage(self)
+            self._template_matching_page.set_project_manager(
+                self.dataset_page.project_manager
+            )
+        return self._template_matching_page
+
+    def _create_script_annotation_page(self):
+        if self._script_annotation_page is None:
+            self._script_annotation_page = ScriptAnnotationPage(self)
+            self._script_annotation_page.set_project_manager(
+                self.dataset_page.project_manager
+            )
+        return self._script_annotation_page
 
     def _create_train_page(self):
         if self._train_page is None:
