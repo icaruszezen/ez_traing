@@ -106,6 +106,14 @@ class TemplateMatcher:
         h, w = img.shape[:2]
         return TemplateInfo(path=path, label=label, image=img, height=h, width=w)
 
+    @staticmethod
+    def create_template_from_image(
+        image: np.ndarray, label: str, path: str = ""
+    ) -> TemplateInfo:
+        """从内存中的 numpy 数组直接创建 TemplateInfo（用于裁剪后的模板）。"""
+        h, w = image.shape[:2]
+        return TemplateInfo(path=path, label=label, image=image, height=h, width=w)
+
     # ------------------------------------------------------------------
     # Single-image matching
     # ------------------------------------------------------------------

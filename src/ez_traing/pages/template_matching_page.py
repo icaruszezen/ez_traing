@@ -13,6 +13,7 @@ from PyQt5.QtGui import QFont, QIcon, QImage, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox as QtCheckBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -46,6 +47,7 @@ from qfluentwidgets import (
 )
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
+from ez_traing.pages.template_editor_dialog import TemplateEditorDialog
 from ez_traing.prelabeling.models import BoundingBox
 from ez_traing.prelabeling.voc_writer import VOCAnnotationWriter
 from ez_traing.template_matching.matcher import TemplateMatcher, TemplateInfo, imread_unicode
@@ -544,14 +546,20 @@ class TemplateMatchingPage(QWidget):
 
         added = 0
         for p in paths:
-            if any(t.path == p for t in self._template_infos):
+            if any(t.path == p and t.label == Path(p).stem for t in self._template_infos):
                 continue
-            label = Path(p).stem
-            try:
-                info = TemplateMatcher.load_template(p, label)
-            except ValueError as exc:
-                self._log(str(exc), "error")
+
+            dialog = TemplateEditorDialog(p, Path(p).stem, parent=self.window())
+            if dialog.exec_() != QDialog.Accepted:
                 continue
+
+            cropped = dialog.get_cropped_image()
+            label = dialog.get_label()
+            if cropped is None:
+                self._log(f"无法读取图片: {p}", "error")
+                continue
+
+            info = TemplateMatcher.create_template_from_image(cropped, label, p)
             self._template_infos.append(info)
             self._add_template_list_item(info)
             added += 1
@@ -561,7 +569,14 @@ class TemplateMatchingPage(QWidget):
             self._log(f"添加了 {added} 个模板")
 
     def _add_template_list_item(self, info: TemplateInfo):
-        pix = QPixmap(info.path)
+        if info.image is not None:
+            rgb = cv2.cvtColor(info.image, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(qimg)
+        else:
+            pix = QPixmap(info.path)
+
         if pix.isNull():
             pix = QPixmap(64, 64)
             pix.fill(Qt.lightGray)
