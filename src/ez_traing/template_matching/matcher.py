@@ -1,9 +1,9 @@
 """OpenCV 模板匹配引擎，封装 cv2.matchTemplate 并提供 NMS 去重。"""
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -41,6 +41,22 @@ class PreprocessConfig:
     canny_low: int = 50
     canny_high: int = 150
     target_roi: Optional[Tuple[int, int, int, int]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        if d["target_roi"] is not None:
+            d["target_roi"] = list(d["target_roi"])
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PreprocessConfig":
+        roi = data.get("target_roi")
+        if isinstance(roi, (list, tuple)) and len(roi) == 4:
+            data = {**data, "target_roi": tuple(roi)}
+        else:
+            data = {**data, "target_roi": None}
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     @property
     def needs_grayscale(self) -> bool:

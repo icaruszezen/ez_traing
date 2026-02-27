@@ -1,15 +1,17 @@
 """模板匹配标注页面 - 使用 OpenCV 模板匹配进行数据标注"""
 
+import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
-from PyQt5.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon, QImage, QPixmap, QTextCursor
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox as QtCheckBox,
@@ -17,7 +19,6 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
-    QLabel,
     QListWidget,
     QListWidgetItem,
     QSplitter,
@@ -50,11 +51,447 @@ from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 from ez_traing.pages.template_editor_dialog import TemplateEditorDialog
 from ez_traing.prelabeling.models import BoundingBox
 from ez_traing.prelabeling.voc_writer import VOCAnnotationWriter
-from ez_traing.template_matching.matcher import TemplateMatcher, TemplateInfo, imread_unicode
+from ez_traing.template_matching.matcher import PreprocessConfig, TemplateMatcher, TemplateInfo, imread_unicode
 from ez_traing.template_matching.worker import TemplateMatchingStats, TemplateMatchingWorker
 from ez_traing.ui.workers import ImageScanWorker as _ImageScanWorker
 
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# Helpers
+# ======================================================================
+
+
+def _draw_box_label(
+    painter: QPainter,
+    text: str,
+    x: int,
+    y_bottom: int,
+    bg_color_bgr: Tuple[int, int, int],
+):
+    """在 QPainter 上绘制带背景色的文字标签（支持中文）。
+
+    ``y_bottom`` 是标签区域的底边 y 坐标（通常等于检测框的 y_min）。
+    ``bg_color_bgr`` 为 BGR 三元组，与 OpenCV 的颜色约定一致。
+    """
+    fm = painter.fontMetrics()
+    tw = fm.horizontalAdvance(text)
+    th = fm.height()
+    pad = 3
+    r, g, b = bg_color_bgr[2], bg_color_bgr[1], bg_color_bgr[0]
+
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(r, g, b))
+    painter.drawRect(x, y_bottom - th - 2 * pad, tw + 2 * pad, th + 2 * pad)
+
+    painter.setPen(QColor(255, 255, 255))
+    painter.setBrush(Qt.NoBrush)
+    painter.drawText(x + pad, y_bottom - fm.descent() - pad, text)
+
+
+def _begin_label_painter(pixmap: QPixmap, pixel_size: int = 16) -> QPainter:
+    """创建用于在 QPixmap 上绘制标签文字的 QPainter。"""
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    font = QFont("Microsoft YaHei", -1)
+    font.setPixelSize(pixel_size)
+    painter.setFont(font)
+    return painter
+
+
+# ======================================================================
+# Annotable Image Label
+# ======================================================================
+
+
+class AnnotableImageLabel(QWidget):
+    """支持缩放、平移、拖拽绘制标注框的图片预览控件。
+
+    - 滚轮：以光标为中心缩放
+    - 中键/右键拖拽：平移画布
+    - 左键拖拽（标注模式）：绘制矩形框
+    - 双击左键：适应窗口
+    """
+
+    box_drawn = pyqtSignal(int, int, int, int)
+
+    _ZOOM_MIN = 0.1
+    _ZOOM_MAX = 20.0
+    _ZOOM_FACTOR = 1.15
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._annotate_mode = False
+        self._pixmap: Optional[QPixmap] = None
+        self._original_w = 0
+        self._original_h = 0
+        self._text = ""
+
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+
+        self._panning = False
+        self._pan_anchor: Optional[QPoint] = None
+        self._pan_start_x = 0.0
+        self._pan_start_y = 0.0
+
+        self._drawing = False
+        self._draw_start: Optional[QPoint] = None
+        self._draw_current: Optional[QPoint] = None
+
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    # -- public API -------------------------------------------------------
+
+    def set_annotate_mode(self, enabled: bool):
+        self._annotate_mode = enabled
+        self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+
+    def set_image_with_meta(
+        self,
+        pixmap: QPixmap,
+        original_w: int,
+        original_h: int,
+        reset_view: bool = True,
+    ):
+        self._pixmap = pixmap
+        self._original_w = original_w
+        self._original_h = original_h
+        self._text = ""
+        self._drawing = False
+        self._draw_start = None
+        self._draw_current = None
+        if reset_view:
+            self._zoom = 1.0
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+        self.update()
+
+    def clear(self):
+        self._pixmap = None
+        self._text = ""
+        self._original_w = 0
+        self._original_h = 0
+        self.update()
+
+    def setText(self, text: str):
+        self._text = text
+        self._pixmap = None
+        self.update()
+
+    # -- layout computation -----------------------------------------------
+
+    def _fit_scale(self) -> float:
+        if self._pixmap is None:
+            return 1.0
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        ww, wh = self.width(), self.height()
+        return min(ww / max(pw, 1), wh / max(ph, 1))
+
+    def _effective_scale(self) -> float:
+        return self._fit_scale() * self._zoom
+
+    def _compute_layout(self) -> Tuple[QPoint, float]:
+        if self._pixmap is None:
+            return QPoint(0, 0), 1.0
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        scale = self._effective_scale()
+        cx = self.width() / 2.0 + self._pan_x
+        cy = self.height() / 2.0 + self._pan_y
+        dx = cx - pw * scale / 2.0
+        dy = cy - ph * scale / 2.0
+        return QPoint(int(dx), int(dy)), scale
+
+    def _widget_to_image(self, pos: QPoint) -> Tuple[int, int]:
+        offset, scale = self._compute_layout()
+        if scale <= 0:
+            return 0, 0
+        ix = int((pos.x() - offset.x()) / scale)
+        iy = int((pos.y() - offset.y()) / scale)
+        ix = max(0, min(ix, self._original_w - 1))
+        iy = max(0, min(iy, self._original_h - 1))
+        return ix, iy
+
+    # -- paint ------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.fillRect(self.rect(), QColor(34, 34, 34))
+
+        if self._pixmap is None:
+            if self._text:
+                painter.setPen(QColor(180, 180, 180))
+                painter.drawText(self.rect(), Qt.AlignCenter, self._text)
+            painter.end()
+            return
+
+        offset, scale = self._compute_layout()
+        dest = QRect(
+            offset.x(), offset.y(),
+            int(self._pixmap.width() * scale),
+            int(self._pixmap.height() * scale),
+        )
+        painter.drawPixmap(dest, self._pixmap)
+
+        if self._drawing and self._draw_start and self._draw_current:
+            painter.setPen(QPen(QColor(255, 165, 0), 2, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(255, 165, 0, 40)))
+            rect = QRect(self._draw_start, self._draw_current).normalized()
+            painter.drawRect(rect)
+
+        painter.end()
+
+    # -- wheel zoom -------------------------------------------------------
+
+    def wheelEvent(self, event):
+        if self._pixmap is None:
+            return
+
+        cursor_pos = event.pos()
+        offset_before, scale_before = self._compute_layout()
+        img_x = (cursor_pos.x() - offset_before.x()) / scale_before
+        img_y = (cursor_pos.y() - offset_before.y()) / scale_before
+
+        delta = event.angleDelta().y()
+        if delta > 0:
+            new_zoom = self._zoom * self._ZOOM_FACTOR
+        elif delta < 0:
+            new_zoom = self._zoom / self._ZOOM_FACTOR
+        else:
+            return
+
+        self._zoom = max(self._ZOOM_MIN, min(new_zoom, self._ZOOM_MAX))
+
+        new_scale = self._effective_scale()
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        target_ox = cursor_pos.x() - img_x * new_scale
+        target_oy = cursor_pos.y() - img_y * new_scale
+        ideal_ox = self.width() / 2.0 - pw * new_scale / 2.0
+        ideal_oy = self.height() / 2.0 - ph * new_scale / 2.0
+        self._pan_x = target_ox - ideal_ox
+        self._pan_y = target_oy - ideal_oy
+        self.update()
+
+    # -- mouse interaction ------------------------------------------------
+
+    def mousePressEvent(self, event):
+        if event.button() in (Qt.MiddleButton, Qt.RightButton):
+            self._panning = True
+            self._pan_anchor = event.pos()
+            self._pan_start_x = self._pan_x
+            self._pan_start_y = self._pan_y
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+
+        if self._annotate_mode and event.button() == Qt.LeftButton:
+            self._drawing = True
+            self._draw_start = event.pos()
+            self._draw_current = event.pos()
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        if self._panning and self._pan_anchor is not None:
+            dx = event.pos().x() - self._pan_anchor.x()
+            dy = event.pos().y() - self._pan_anchor.y()
+            self._pan_x = self._pan_start_x + dx
+            self._pan_y = self._pan_start_y + dy
+            self.update()
+            return
+
+        if self._drawing:
+            self._draw_current = event.pos()
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self._panning:
+            self._panning = False
+            self._pan_anchor = None
+            self.setCursor(
+                Qt.CrossCursor if self._annotate_mode else Qt.ArrowCursor
+            )
+            return
+
+        if self._drawing and event.button() == Qt.LeftButton:
+            self._drawing = False
+            if self._draw_start and self._draw_current:
+                x1, y1 = self._widget_to_image(self._draw_start)
+                x2, y2 = self._widget_to_image(self._draw_current)
+                x_min, x_max = min(x1, x2), max(x1, x2)
+                y_min, y_max = min(y1, y2), max(y1, y2)
+                if (x_max - x_min) > 3 and (y_max - y_min) > 3:
+                    self.box_drawn.emit(x_min, y_min, x_max, y_max)
+            self._draw_start = None
+            self._draw_current = None
+            self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._zoom = 1.0
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+            self.update()
+
+
+# ======================================================================
+# Quick Annotate Dialog
+# ======================================================================
+
+
+class QuickAnnotateDialog(QDialog):
+    """快速标定对话框 — 在大窗口中查看图片并绘制标注框。"""
+
+    def __init__(
+        self,
+        image_path: str,
+        labels: List[str],
+        existing_boxes: Optional[List[BoundingBox]] = None,
+        manual_indices: Optional[set] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"快速标定 - {Path(image_path).name}")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        self.resize(1200, 800)
+
+        self._image_path = image_path
+        self._labels = labels
+        self._existing_boxes = existing_boxes or []
+        self._manual_indices = manual_indices or set()
+        self._new_boxes: List[BoundingBox] = []
+
+        self._cv_image = imread_unicode(image_path)
+        if self._cv_image is not None:
+            self._img_h, self._img_w = self._cv_image.shape[:2]
+        else:
+            self._img_h, self._img_w = 0, 0
+
+        self._rgb_buf = None
+        self._first_render = True
+        self._setup_ui()
+        self._refresh_canvas()
+
+    # -- UI ---------------------------------------------------------------
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.addWidget(StrongBodyLabel("标签:", self))
+        self._label_combo = ComboBox(self)
+        self._label_combo.addItems(self._labels)
+        self._label_combo.setMinimumWidth(150)
+        top.addWidget(self._label_combo)
+        top.addStretch()
+        self._box_count_label = CaptionLabel("已标注 0 个框", self)
+        top.addWidget(self._box_count_label)
+        layout.addLayout(top)
+
+        layout.addWidget(CaptionLabel(
+            "左键拖拽绘制标注框 | 滚轮缩放 | 中键/右键拖拽平移 | 双击还原", self,
+        ))
+
+        self._canvas = AnnotableImageLabel(self)
+        self._canvas.setMinimumSize(640, 480)
+        self._canvas.setStyleSheet("background: #1a1a1a; border-radius: 6px;")
+        self._canvas.set_annotate_mode(True)
+        self._canvas.box_drawn.connect(self._on_canvas_box_drawn)
+        layout.addWidget(self._canvas, 1)
+
+        bottom = QHBoxLayout()
+        undo_btn = PushButton("撤销上一个框", self)
+        undo_btn.setIcon(FIF.CANCEL)
+        undo_btn.clicked.connect(self._on_undo)
+        bottom.addWidget(undo_btn)
+        bottom.addStretch()
+
+        cancel_btn = PushButton("取消", self)
+        cancel_btn.clicked.connect(self.reject)
+        bottom.addWidget(cancel_btn)
+
+        ok_btn = PrimaryPushButton("确定", self)
+        ok_btn.clicked.connect(self.accept)
+        bottom.addWidget(ok_btn)
+        layout.addLayout(bottom)
+
+    # -- canvas rendering -------------------------------------------------
+
+    def _refresh_canvas(self):
+        if self._cv_image is None:
+            self._canvas.setText("无法读取图片")
+            return
+
+        img = self._cv_image.copy()
+        labels_info: List[Tuple[str, int, int, Tuple[int, int, int]]] = []
+
+        for i, box in enumerate(self._existing_boxes):
+            is_manual = i in self._manual_indices
+            color = (0, 165, 255) if is_manual else (0, 255, 0)
+            cv2.rectangle(
+                img, (box.x_min, box.y_min), (box.x_max, box.y_max), color, 2,
+            )
+            label_text = (
+                f"{box.label} [手动]"
+                if is_manual
+                else f"{box.label} {box.confidence:.2f}"
+            )
+            labels_info.append((label_text, box.x_min, box.y_min, color))
+
+        for box in self._new_boxes:
+            color = (255, 80, 0)
+            cv2.rectangle(
+                img, (box.x_min, box.y_min), (box.x_max, box.y_max), color, 2,
+            )
+            labels_info.append((box.label, box.x_min, box.y_min, color))
+
+        self._rgb_buf = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, ch = self._rgb_buf.shape
+        qimg = QImage(self._rgb_buf.data, w, h, ch * w, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+
+        if labels_info:
+            painter = _begin_label_painter(pixmap)
+            for text, x, y_bottom, bgr in labels_info:
+                _draw_box_label(painter, text, x, y_bottom, bgr)
+            painter.end()
+
+        reset = self._first_render
+        self._first_render = False
+        self._canvas.set_image_with_meta(
+            pixmap, self._img_w, self._img_h, reset_view=reset,
+        )
+
+    # -- interaction ------------------------------------------------------
+
+    def _on_canvas_box_drawn(self, x_min, y_min, x_max, y_max):
+        label = self._label_combo.currentText()
+        if not label:
+            return
+        box = BoundingBox(
+            label=label, x_min=x_min, y_min=y_min,
+            x_max=x_max, y_max=y_max, confidence=1.0,
+        )
+        self._new_boxes.append(box)
+        self._box_count_label.setText(f"已标注 {len(self._new_boxes)} 个框")
+        self._refresh_canvas()
+
+    def _on_undo(self):
+        if self._new_boxes:
+            self._new_boxes.pop()
+            self._box_count_label.setText(
+                f"已标注 {len(self._new_boxes)} 个框"
+            )
+            self._refresh_canvas()
+
+    # -- public API -------------------------------------------------------
+
+    def get_new_boxes(self) -> List[BoundingBox]:
+        return list(self._new_boxes)
 
 
 # ======================================================================
@@ -82,6 +519,10 @@ class TemplateMatchingPage(QWidget):
         self._match_results: Dict[str, List[BoundingBox]] = {}
         # 勾选状态：(image_path, box_index) -> checked
         self._check_states: Dict[Tuple[str, int], bool] = {}
+        # 无匹配的图片路径（匹配成功但 boxes 为空）
+        self._unmatched_paths: List[str] = []
+        # 手动标注框标记：(image_path, box_index)
+        self._manual_box_keys: set = set()
 
         self._run_started_at: Optional[float] = None
         self._log_buffer: List[str] = []
@@ -185,6 +626,17 @@ class TemplateMatchingPage(QWidget):
         btn_row.addWidget(clear_btn)
 
         btn_row.addStretch()
+
+        save_tpl_btn = PushButton("保存模板", card)
+        save_tpl_btn.setIcon(FIF.SAVE)
+        save_tpl_btn.clicked.connect(self._on_save_templates)
+        btn_row.addWidget(save_tpl_btn)
+
+        load_tpl_btn = PushButton("加载模板", card)
+        load_tpl_btn.setIcon(FIF.FOLDER)
+        load_tpl_btn.clicked.connect(self._on_load_templates)
+        btn_row.addWidget(load_tpl_btn)
+
         layout.addLayout(btn_row)
 
         layout.addWidget(
@@ -341,8 +793,27 @@ class TemplateMatchingPage(QWidget):
         self._box_table.setMaximumHeight(240)
         right_layout.addWidget(self._box_table)
 
-        self._preview_label = QLabel(right)
-        self._preview_label.setAlignment(Qt.AlignCenter)
+        # 快速标定按钮行（默认隐藏，选中无匹配或有手动框的图片时显示）
+        self._quick_annotate_row = QWidget(right)
+        qa_layout = QHBoxLayout(self._quick_annotate_row)
+        qa_layout.setContentsMargins(0, 0, 0, 0)
+        qa_layout.setSpacing(8)
+
+        self._quick_draw_btn = PushButton("快速标定", self._quick_annotate_row)
+        self._quick_draw_btn.setIcon(FIF.EDIT)
+        self._quick_draw_btn.clicked.connect(self._on_open_quick_annotate)
+        qa_layout.addWidget(self._quick_draw_btn)
+
+        self._undo_draw_btn = PushButton("撤销", self._quick_annotate_row)
+        self._undo_draw_btn.setIcon(FIF.CANCEL)
+        self._undo_draw_btn.clicked.connect(self._on_undo_draw)
+        qa_layout.addWidget(self._undo_draw_btn)
+
+        qa_layout.addStretch()
+        self._quick_annotate_row.setVisible(False)
+        right_layout.addWidget(self._quick_annotate_row)
+
+        self._preview_label = AnnotableImageLabel(right)
         self._preview_label.setMinimumHeight(240)
         self._preview_label.setStyleSheet(
             "background: #222; border-radius: 4px;"
@@ -361,6 +832,13 @@ class TemplateMatchingPage(QWidget):
         self.save_btn.setEnabled(False)
         self.save_btn.clicked.connect(self._on_save)
         save_row.addWidget(self.save_btn)
+
+        self.save_all_btn = PrimaryPushButton("全部保存", card)
+        self.save_all_btn.setIcon(FIF.SAVE)
+        self.save_all_btn.setEnabled(False)
+        self.save_all_btn.clicked.connect(self._on_save_all)
+        save_row.addWidget(self.save_all_btn)
+
         save_row.addStretch()
 
         self._result_summary_label = CaptionLabel("", card)
@@ -576,6 +1054,149 @@ class TemplateMatchingPage(QWidget):
         self._tpl_count_label.setText(f"已添加 {len(self._template_infos)} 个模板")
 
     # ==================================================================
+    # Template save / load
+    # ==================================================================
+
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        return re.sub(r'[\\/:*?"<>|]', "_", name)
+
+    def _on_save_templates(self):
+        if not self._template_infos:
+            InfoBar.warning(
+                title="提示",
+                content="当前没有模板可保存",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
+
+        directory = QFileDialog.getExistingDirectory(
+            self, "选择保存目录", ""
+        )
+        if not directory:
+            return
+
+        save_dir = Path(directory)
+        entries: List[Dict[str, Any]] = []
+
+        for idx, info in enumerate(self._template_infos):
+            safe_label = self._sanitize_filename(info.label)
+            img_filename = f"{idx}_{safe_label}.png"
+            img_path = save_dir / img_filename
+
+            if info.image is not None:
+                ok, buf = cv2.imencode(".png", info.image)
+                if ok:
+                    buf.tofile(str(img_path))
+                else:
+                    self._log(f"编码模板图像失败: {info.label}", "error")
+                    continue
+            else:
+                self._log(f"模板缺少图像数据: {info.label}", "error")
+                continue
+
+            entries.append({
+                "label": info.label,
+                "original_path": info.path,
+                "image_file": img_filename,
+                "width": info.width,
+                "height": info.height,
+                "preprocess": info.preprocess.to_dict(),
+            })
+
+        payload = {"version": 1, "templates": entries}
+        json_path = save_dir / "templates.json"
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self._log(f"保存 templates.json 失败: {exc}", "error")
+            return
+
+        self._log(f"已保存 {len(entries)} 个模板到 {save_dir}")
+        InfoBar.success(
+            title="保存成功",
+            content=f"已保存 {len(entries)} 个模板到所选目录",
+            parent=self.window(),
+            position=InfoBarPosition.TOP,
+            duration=4000,
+        )
+
+    def _on_load_templates(self):
+        json_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择模板配置文件",
+            "",
+            "模板配置 (templates.json);;JSON 文件 (*.json);;所有文件 (*)",
+        )
+        if not json_file:
+            return
+
+        json_path = Path(json_file)
+        base_dir = json_path.parent
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            self._log(f"读取 templates.json 失败: {exc}", "error")
+            InfoBar.error(
+                title="加载失败",
+                content=f"无法读取配置文件: {exc}",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
+
+        templates_data = payload.get("templates", [])
+        if not templates_data:
+            InfoBar.warning(
+                title="提示",
+                content="配置文件中没有模板数据",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
+
+        loaded = 0
+        for entry in templates_data:
+            img_filename = entry.get("image_file", "")
+            img_path = base_dir / img_filename
+            image = imread_unicode(str(img_path))
+            if image is None:
+                self._log(f"无法读取模板图像: {img_path}", "error")
+                continue
+
+            label = entry.get("label", img_path.stem)
+            original_path = entry.get("original_path", str(img_path))
+            pp_data = entry.get("preprocess", {})
+            config = PreprocessConfig.from_dict(pp_data)
+
+            h, w = image.shape[:2]
+            info = TemplateInfo(
+                path=original_path,
+                label=label,
+                image=image,
+                height=h,
+                width=w,
+                preprocess=config,
+            )
+            self._template_infos.append(info)
+            self._add_template_list_item(info)
+            loaded += 1
+
+        self._update_tpl_count()
+        self._log(f"从 {json_path} 加载了 {loaded} 个模板")
+        InfoBar.success(
+            title="加载成功",
+            content=f"已加载 {loaded} 个模板",
+            parent=self.window(),
+            position=InfoBarPosition.TOP,
+            duration=4000,
+        )
+
+    # ==================================================================
     # Matching flow
     # ==================================================================
 
@@ -606,10 +1227,14 @@ class TemplateMatchingPage(QWidget):
 
         self._match_results.clear()
         self._check_states.clear()
+        self._unmatched_paths.clear()
+        self._manual_box_keys.clear()
         self._result_image_list.clear()
         self._box_table.setRowCount(0)
         self._preview_label.clear()
+        self._show_quick_annotate_controls(False)
         self.save_btn.setEnabled(False)
+        self.save_all_btn.setEnabled(False)
         self._result_summary_label.setText("")
 
         self._worker = TemplateMatchingWorker(
@@ -649,6 +1274,8 @@ class TemplateMatchingPage(QWidget):
             )
             item.setData(Qt.UserRole, path)
             self._result_image_list.addItem(item)
+        elif success:
+            self._unmatched_paths.append(path)
 
         if not success:
             self._log(message, "error")
@@ -672,11 +1299,27 @@ class TemplateMatchingPage(QWidget):
         self._log(f"耗时: {elapsed:.2f}s")
         self.progress_label.setText(summary)
 
-        if total_boxes > 0:
-            self.save_btn.setEnabled(True)
-            self._result_summary_label.setText(
-                f"{len(self._match_results)} 张图片共 {total_boxes} 个候选框"
-            )
+        # 将无匹配图片追加到结果列表，橙色高亮显示
+        for path in self._unmatched_paths:
+            item = QListWidgetItem(f"{Path(path).name}  (无匹配)")
+            item.setData(Qt.UserRole, path)
+            item.setData(Qt.UserRole + 1, "unmatched")
+            item.setForeground(QBrush(QColor(255, 140, 0)))
+            self._result_image_list.addItem(item)
+
+        if total_boxes > 0 or self._unmatched_paths:
+            self.save_btn.setEnabled(total_boxes > 0)
+            self.save_all_btn.setEnabled(total_boxes > 0)
+            parts = []
+            if self._match_results:
+                parts.append(
+                    f"{len(self._match_results)} 张图片共 {total_boxes} 个候选框"
+                )
+            if self._unmatched_paths:
+                parts.append(
+                    f"{len(self._unmatched_paths)} 张无匹配（可快速标定）"
+                )
+            self._result_summary_label.setText("；".join(parts))
         else:
             self._result_summary_label.setText("未找到任何匹配")
 
@@ -698,14 +1341,20 @@ class TemplateMatchingPage(QWidget):
         if row < 0:
             self._box_table.setRowCount(0)
             self._preview_label.clear()
+            self._show_quick_annotate_controls(False)
             return
 
         item = self._result_image_list.item(row)
         path = item.data(Qt.UserRole)
+        is_unmatched = item.data(Qt.UserRole + 1) == "unmatched"
         boxes = self._match_results.get(path, [])
+        has_manual = any(
+            (path, i) in self._manual_box_keys for i in range(len(boxes))
+        )
 
         self._populate_box_table(path, boxes)
         self._render_preview(path, boxes)
+        self._show_quick_annotate_controls(is_unmatched or has_manual)
 
     def _populate_box_table(self, image_path: str, boxes: List[BoundingBox]):
         self._box_table.blockSignals(True)
@@ -752,39 +1401,129 @@ class TemplateMatchingPage(QWidget):
             self._preview_label.setText("无法读取图片")
             return
 
+        h_orig, w_orig = img.shape[:2]
+        labels_info: List[Tuple[str, int, int, Tuple[int, int, int]]] = []
+
         for i, box in enumerate(boxes):
             checked = self._check_states.get((image_path, i), True)
-            color = (0, 255, 0) if checked else (128, 128, 128)
+            is_manual = (image_path, i) in self._manual_box_keys
+            if is_manual:
+                color = (255, 165, 0)
+            elif checked:
+                color = (0, 255, 0)
+            else:
+                color = (128, 128, 128)
             cv2.rectangle(img, (box.x_min, box.y_min), (box.x_max, box.y_max), color, 2)
-            label_text = f"{box.label} {box.confidence:.2f}"
-            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(
-                img,
-                (box.x_min, box.y_min - th - 6),
-                (box.x_min + tw + 4, box.y_min),
-                color,
-                -1,
+            label_text = (
+                f"{box.label} [手动]"
+                if is_manual
+                else f"{box.label} {box.confidence:.2f}"
             )
-            cv2.putText(
-                img,
-                label_text,
-                (box.x_min + 2, box.y_min - 4),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
+            labels_info.append((label_text, box.x_min, box.y_min, color))
 
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimg)
 
-        label_w = self._preview_label.width() or 560
-        label_h = self._preview_label.height() or 400
-        scaled = pixmap.scaled(label_w, label_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self._preview_label.setPixmap(scaled)
+        if labels_info:
+            painter = _begin_label_painter(pixmap)
+            for text, x, y_bottom, bgr in labels_info:
+                _draw_box_label(painter, text, x, y_bottom, bgr)
+            painter.end()
+
+        self._preview_label.set_image_with_meta(pixmap, w_orig, h_orig)
+
+    # ==================================================================
+    # Quick annotation (快速标定)
+    # ==================================================================
+
+    def _show_quick_annotate_controls(self, visible: bool):
+        self._quick_annotate_row.setVisible(visible)
+
+    def _on_open_quick_annotate(self):
+        row = self._result_image_list.currentRow()
+        if row < 0:
+            return
+        item = self._result_image_list.item(row)
+        path = item.data(Qt.UserRole)
+
+        labels = list(dict.fromkeys(t.label for t in self._template_infos))
+        if not labels:
+            return
+
+        existing = self._match_results.get(path, [])
+        manual_idx = {
+            i for i in range(len(existing))
+            if (path, i) in self._manual_box_keys
+        }
+
+        dialog = QuickAnnotateDialog(
+            path, labels, existing, manual_idx, parent=self.window(),
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        new_boxes = dialog.get_new_boxes()
+        if not new_boxes:
+            return
+
+        if path not in self._match_results:
+            self._match_results[path] = []
+        boxes = self._match_results[path]
+        for box in new_boxes:
+            idx = len(boxes)
+            boxes.append(box)
+            self._check_states[(path, idx)] = True
+            self._manual_box_keys.add((path, idx))
+
+        if path in self._unmatched_paths:
+            self._unmatched_paths.remove(path)
+        item.setText(f"{Path(path).name}  ({len(boxes)} 个)")
+        item.setData(Qt.UserRole + 1, None)
+        item.setForeground(QBrush())
+
+        self._populate_box_table(path, boxes)
+        self._render_preview(path, boxes)
+
+        total_boxes = sum(len(b) for b in self._match_results.values())
+        if total_boxes > 0:
+            self.save_btn.setEnabled(True)
+            self.save_all_btn.setEnabled(True)
+
+        self._log(
+            f"快速标定: {Path(path).name} 添加了 {len(new_boxes)} 个标注框"
+        )
+
+    def _on_undo_draw(self):
+        row = self._result_image_list.currentRow()
+        if row < 0:
+            return
+        item = self._result_image_list.item(row)
+        path = item.data(Qt.UserRole)
+        boxes = self._match_results.get(path, [])
+        if not boxes:
+            return
+
+        last_idx = len(boxes) - 1
+        if (path, last_idx) not in self._manual_box_keys:
+            return
+
+        boxes.pop()
+        self._check_states.pop((path, last_idx), None)
+        self._manual_box_keys.discard((path, last_idx))
+
+        if not boxes:
+            del self._match_results[path]
+            self._unmatched_paths.append(path)
+            item.setText(f"{Path(path).name}  (无匹配)")
+            item.setData(Qt.UserRole + 1, "unmatched")
+            item.setForeground(QBrush(QColor(255, 140, 0)))
+        else:
+            item.setText(f"{Path(path).name}  ({len(boxes)} 个)")
+
+        self._populate_box_table(path, boxes)
+        self._render_preview(path, boxes)
 
     # ==================================================================
     # Select / Deselect all
@@ -814,31 +1553,42 @@ class TemplateMatchingPage(QWidget):
     # ==================================================================
 
     def _on_save(self):
+        self._do_save(only_checked=True)
+
+    def _on_save_all(self):
+        self._do_save(only_checked=False)
+
+    def _do_save(self, only_checked: bool):
         saved_count = 0
         merged_count = 0
         total_boxes = 0
 
         for image_path, boxes in self._match_results.items():
-            selected: List[BoundingBox] = []
-            for i, box in enumerate(boxes):
-                if self._check_states.get((image_path, i), True):
-                    selected.append(box)
+            if only_checked:
+                selected = [
+                    box for i, box in enumerate(boxes)
+                    if self._check_states.get((image_path, i), True)
+                ]
+            else:
+                selected = list(boxes)
 
             if not selected:
                 continue
 
+            xml_path = str(Path(image_path).with_suffix(".xml"))
+
             try:
                 image_size = self._voc_writer._get_image_size(image_path)
-                has_existing = Path(image_path).with_suffix(".xml").exists()
+                has_existing = Path(xml_path).exists()
 
                 if has_existing:
                     self._voc_writer.save_merged_annotation(
-                        image_path, image_size, selected
+                        image_path, image_size, selected, output_path=xml_path,
                     )
                     merged_count += 1
                 else:
                     self._voc_writer.save_annotation(
-                        image_path, image_size, selected
+                        image_path, image_size, selected, output_path=xml_path,
                     )
 
                 saved_count += 1
@@ -846,13 +1596,14 @@ class TemplateMatchingPage(QWidget):
             except Exception as exc:
                 self._log(f"保存失败 {Path(image_path).name}: {exc}", "error")
 
+        title = "全部保存完成" if not only_checked else "保存完成"
         summary = f"已保存 {saved_count} 张图片的 {total_boxes} 个标注框"
         if merged_count:
             summary += f"（其中 {merged_count} 张与已有标注合并）"
 
         self._log(summary)
         InfoBar.success(
-            title="保存完成",
+            title=title,
             content=summary,
             parent=self.window(),
             position=InfoBarPosition.TOP,
@@ -872,7 +1623,9 @@ class TemplateMatchingPage(QWidget):
         self.max_candidates_spin.setEnabled(not running)
         self.multi_scale_cb.setEnabled(not running)
         self.skip_annotated_cb.setEnabled(not running)
-        self.save_btn.setEnabled(not running and bool(self._match_results))
+        has_results = not running and bool(self._match_results)
+        self.save_btn.setEnabled(has_results)
+        self.save_all_btn.setEnabled(has_results)
 
     # ==================================================================
     # Logging
