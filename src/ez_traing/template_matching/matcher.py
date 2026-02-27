@@ -23,6 +23,37 @@ def imread_unicode(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndar
 
 
 @dataclass
+class PreprocessConfig:
+    """模板匹配的图像预处理配置。
+
+    创建模板时由用户配置，匹配时对模板图和目标图施加相同的预处理流水线。
+    执行顺序: 灰度化 -> 高斯模糊 -> 二值化/自适应二值化 -> Canny 边缘检测。
+    """
+
+    to_grayscale: bool = False
+    gaussian_blur_ksize: int = 0
+    binary_threshold: int = -1
+    binary_inverse: bool = False
+    use_adaptive_threshold: bool = False
+    adaptive_block_size: int = 11
+    adaptive_c: int = 2
+    canny_enabled: bool = False
+    canny_low: int = 50
+    canny_high: int = 150
+    target_roi: Optional[Tuple[int, int, int, int]] = None
+
+    @property
+    def needs_grayscale(self) -> bool:
+        """二值化和 Canny 隐式要求灰度输入。"""
+        return (
+            self.to_grayscale
+            or self.binary_threshold >= 0
+            or self.use_adaptive_threshold
+            or self.canny_enabled
+        )
+
+
+@dataclass
 class TemplateInfo:
     """单个模板图的元信息。"""
 
@@ -31,6 +62,7 @@ class TemplateInfo:
     image: Optional[np.ndarray] = field(default=None, repr=False)
     height: int = 0
     width: int = 0
+    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
 
 
 @dataclass
@@ -108,11 +140,87 @@ class TemplateMatcher:
 
     @staticmethod
     def create_template_from_image(
-        image: np.ndarray, label: str, path: str = ""
+        image: np.ndarray,
+        label: str,
+        path: str = "",
+        preprocess: Optional[PreprocessConfig] = None,
     ) -> TemplateInfo:
         """从内存中的 numpy 数组直接创建 TemplateInfo（用于裁剪后的模板）。"""
         h, w = image.shape[:2]
-        return TemplateInfo(path=path, label=label, image=image, height=h, width=w)
+        return TemplateInfo(
+            path=path,
+            label=label,
+            image=image,
+            height=h,
+            width=w,
+            preprocess=preprocess or PreprocessConfig(),
+        )
+
+    # ------------------------------------------------------------------
+    # Image preprocessing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def preprocess_image(
+        image: np.ndarray, config: PreprocessConfig
+    ) -> np.ndarray:
+        """按 PreprocessConfig 对图像施加预处理流水线。
+
+        顺序: 灰度化 -> 高斯模糊 -> 二值化 -> Canny。
+        """
+        img = image.copy()
+
+        if config.needs_grayscale and img.ndim == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        if config.gaussian_blur_ksize > 0:
+            k = config.gaussian_blur_ksize
+            if k % 2 == 0:
+                k += 1
+            img = cv2.GaussianBlur(img, (k, k), 0)
+
+        if config.use_adaptive_threshold:
+            if img.ndim == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            block = config.adaptive_block_size
+            if block % 2 == 0:
+                block += 1
+            block = max(3, block)
+            img = cv2.adaptiveThreshold(
+                img,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV if config.binary_inverse else cv2.THRESH_BINARY,
+                block,
+                config.adaptive_c,
+            )
+        elif config.binary_threshold >= 0:
+            if img.ndim == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            thresh_type = (
+                cv2.THRESH_BINARY_INV if config.binary_inverse else cv2.THRESH_BINARY
+            )
+            _, img = cv2.threshold(img, config.binary_threshold, 255, thresh_type)
+
+        if config.canny_enabled:
+            if img.ndim == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = cv2.Canny(img, config.canny_low, config.canny_high)
+
+        return img
+
+    @staticmethod
+    def _extract_roi(
+        image: np.ndarray, roi: Tuple[int, int, int, int]
+    ) -> Tuple[np.ndarray, int, int]:
+        """从 image 中提取 ROI 子区域，返回 (子区域, offset_x, offset_y)。"""
+        x, y, w, h = roi
+        ih, iw = image.shape[:2]
+        x = max(0, min(x, iw - 1))
+        y = max(0, min(y, ih - 1))
+        w = min(w, iw - x)
+        h = min(h, ih - y)
+        return image[y : y + h, x : x + w].copy(), x, y
 
     # ------------------------------------------------------------------
     # Single-image matching
@@ -138,10 +246,26 @@ class TemplateMatcher:
             if tpl.image is None:
                 continue
             try:
+                search_region = target
+                offset_x, offset_y = 0, 0
+                if tpl.preprocess.target_roi:
+                    search_region, offset_x, offset_y = self._extract_roi(
+                        target, tpl.preprocess.target_roi
+                    )
+
+                processed_target = self.preprocess_image(
+                    search_region, tpl.preprocess
+                )
+                processed_tpl = self.preprocess_image(tpl.image, tpl.preprocess)
+
                 if self.multi_scale:
-                    boxes = self._match_multi_scale(target, tpl)
+                    boxes = self._match_multi_scale(
+                        processed_target, processed_tpl, tpl, offset_x, offset_y
+                    )
                 else:
-                    boxes = self._match_single_scale(target, tpl)
+                    boxes = self._match_single_scale(
+                        processed_target, processed_tpl, tpl, offset_x, offset_y
+                    )
                 all_boxes.extend(boxes)
             except Exception as exc:
                 logger.warning(
@@ -164,32 +288,58 @@ class TemplateMatcher:
     # ------------------------------------------------------------------
 
     def _match_single_scale(
-        self, target: np.ndarray, tpl: TemplateInfo
+        self,
+        target: np.ndarray,
+        tpl_image: np.ndarray,
+        tpl: TemplateInfo,
+        offset_x: int = 0,
+        offset_y: int = 0,
     ) -> List[BoundingBox]:
-        th, tw = tpl.height, tpl.width
+        th, tw = tpl_image.shape[:2]
         if target.shape[0] < th or target.shape[1] < tw:
             return []
 
-        result = cv2.matchTemplate(target, tpl.image, self.method)
-        return self._extract_boxes(result, tw, th, tpl.label)
+        result = cv2.matchTemplate(target, tpl_image, self.method)
+        return self._extract_boxes(
+            result, tpl.width, tpl.height, tpl.label, offset_x, offset_y
+        )
 
     def _match_multi_scale(
-        self, target: np.ndarray, tpl: TemplateInfo
+        self,
+        target: np.ndarray,
+        tpl_image: np.ndarray,
+        tpl: TemplateInfo,
+        offset_x: int = 0,
+        offset_y: int = 0,
     ) -> List[BoundingBox]:
         boxes: List[BoundingBox] = []
         lo, hi = self.scale_range
         for scale in np.linspace(lo, hi, self.scale_steps):
-            new_w = max(1, int(tpl.width * scale))
-            new_h = max(1, int(tpl.height * scale))
+            new_w = max(1, int(tpl_image.shape[1] * scale))
+            new_h = max(1, int(tpl_image.shape[0] * scale))
             if new_h > target.shape[0] or new_w > target.shape[1]:
                 continue
-            resized = cv2.resize(tpl.image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            resized = cv2.resize(
+                tpl_image, (new_w, new_h), interpolation=cv2.INTER_AREA
+            )
             result = cv2.matchTemplate(target, resized, self.method)
-            boxes.extend(self._extract_boxes(result, new_w, new_h, tpl.label))
+            orig_w = max(1, int(tpl.width * scale))
+            orig_h = max(1, int(tpl.height * scale))
+            boxes.extend(
+                self._extract_boxes(
+                    result, orig_w, orig_h, tpl.label, offset_x, offset_y
+                )
+            )
         return boxes
 
     def _extract_boxes(
-        self, result: np.ndarray, tw: int, th: int, label: str
+        self,
+        result: np.ndarray,
+        tw: int,
+        th: int,
+        label: str,
+        offset_x: int = 0,
+        offset_y: int = 0,
     ) -> List[BoundingBox]:
         locations = np.where(result >= self.threshold)
         boxes: List[BoundingBox] = []
@@ -198,10 +348,10 @@ class TemplateMatcher:
             boxes.append(
                 BoundingBox(
                     label=label,
-                    x_min=int(x),
-                    y_min=int(y),
-                    x_max=int(x + tw),
-                    y_max=int(y + th),
+                    x_min=int(x) + offset_x,
+                    y_min=int(y) + offset_y,
+                    x_max=int(x + tw) + offset_x,
+                    y_max=int(y + th) + offset_y,
                     confidence=score,
                 )
             )

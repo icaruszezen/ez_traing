@@ -526,7 +526,8 @@ class TemplateMatchingPage(QWidget):
                 self._log(f"无法读取图片: {p}", "error")
                 continue
 
-            info = TemplateMatcher.create_template_from_image(cropped, label, p)
+            config = dialog.get_preprocess_config()
+            info = TemplateMatcher.create_template_from_image(cropped, label, p, config)
             self._template_infos.append(info)
             self._add_template_list_item(info)
             added += 1

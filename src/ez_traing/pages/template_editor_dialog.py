@@ -22,16 +22,19 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     CaptionLabel,
+    CheckBox,
     DoubleSpinBox,
     FluentIcon as FIF,
     LineEdit,
     PrimaryPushButton,
     PushButton,
+    SpinBox,
     StrongBodyLabel,
     SubtitleLabel,
 )
 
 from ez_traing.template_matching.matcher import (
+    PreprocessConfig,
     TemplateMatcher,
     TemplateInfo,
     imread_unicode,
@@ -65,6 +68,7 @@ class CropImageWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._source_image: Optional[np.ndarray] = None
+        self._display_override: Optional[np.ndarray] = None
         self._display_pixmap: Optional[QPixmap] = None
 
         self._crop_rect: Optional[Tuple[int, int, int, int]] = None
@@ -97,6 +101,7 @@ class CropImageWidget(QWidget):
 
     def set_image(self, image: np.ndarray):
         self._source_image = image.copy()
+        self._display_override = None
         self._crop_rect = None
         self._zoom = 1.0
         self._pan_x = 0.0
@@ -104,6 +109,12 @@ class CropImageWidget(QWidget):
         self._update_display()
         self.update()
         self.zoom_changed.emit(self._zoom)
+
+    def set_display_override(self, image: Optional[np.ndarray]):
+        """设置用于显示的替代图像（如预处理后的图像），不影响裁剪坐标。"""
+        self._display_override = image
+        self._update_display()
+        self.update()
 
     def get_crop_rect(self) -> Optional[Tuple[int, int, int, int]]:
         return self._crop_rect
@@ -136,10 +147,14 @@ class CropImageWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _update_display(self):
-        if self._source_image is None:
+        img = self._display_override if self._display_override is not None else self._source_image
+        if img is None:
             self._display_pixmap = None
             return
-        rgb = cv2.cvtColor(self._source_image, cv2.COLOR_BGR2RGB)
+        if img.ndim == 2:
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -381,6 +396,65 @@ class CropImageWidget(QWidget):
 
 
 # ======================================================================
+# ROI Draw Dialog
+# ======================================================================
+
+
+class RoiDrawDialog(QDialog):
+    """在测试图片上绘制搜索区域 (ROI) 的对话框。"""
+
+    def __init__(self, image: np.ndarray, current_roi: Optional[Tuple[int, int, int, int]] = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("绘制搜索区域 (ROI)")
+        self.setMinimumSize(720, 540)
+        self.resize(900, 650)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(CaptionLabel("在图片上拖拽绘制搜索区域矩形，匹配时仅在该区域内搜索"))
+
+        self._draw_widget = CropImageWidget()
+        self._draw_widget.set_image(image)
+        if current_roi:
+            x, y, w, h = current_roi
+            self._draw_widget._crop_rect = self._draw_widget._clamp_rect((x, y, w, h))
+            self._draw_widget.update()
+        layout.addWidget(self._draw_widget, 1)
+
+        self._info_label = CaptionLabel("")
+        self._draw_widget.selection_changed.connect(self._on_sel_changed)
+        layout.addWidget(self._info_label)
+        self._on_sel_changed()
+
+        btn_row = QHBoxLayout()
+        reset_btn = PushButton("清除选区")
+        reset_btn.setIcon(FIF.SYNC)
+        reset_btn.clicked.connect(self._draw_widget.reset_selection)
+        btn_row.addWidget(reset_btn)
+        btn_row.addStretch()
+        ok_btn = PrimaryPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        cancel_btn = PushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _on_sel_changed(self):
+        rect = self._draw_widget.get_crop_rect()
+        if rect:
+            x, y, w, h = rect
+            self._info_label.setText(f"ROI: x={x}, y={y}, w={w}, h={h}")
+        else:
+            self._info_label.setText("未选择区域")
+
+    def get_roi(self) -> Optional[Tuple[int, int, int, int]]:
+        return self._draw_widget.get_crop_rect()
+
+
+# ======================================================================
 # Template Editor Dialog
 # ======================================================================
 
@@ -400,8 +474,8 @@ class TemplateEditorDialog(QDialog):
         self._test_image_paths: List[str] = []
 
         self.setWindowTitle(f"编辑模板 - {Path(image_path).name}")
-        self.setMinimumSize(960, 620)
-        self.resize(1100, 700)
+        self.setMinimumSize(1060, 720)
+        self.resize(1200, 800)
 
         self._setup_ui(default_label or Path(image_path).stem)
 
@@ -463,6 +537,108 @@ class TemplateEditorDialog(QDialog):
         left_layout.addWidget(
             CaptionLabel("滚轮缩放 | 中键/右键拖拽平移 | 双击适应窗口")
         )
+
+        # ---- preprocessing options ----
+        left_layout.addWidget(SubtitleLabel("预处理选项"))
+
+        self._pp_grayscale_cb = CheckBox("灰度化")
+        self._pp_grayscale_cb.stateChanged.connect(self._on_preprocess_changed)
+        left_layout.addWidget(self._pp_grayscale_cb)
+
+        blur_row = QHBoxLayout()
+        self._pp_blur_cb = CheckBox("高斯模糊")
+        self._pp_blur_cb.stateChanged.connect(self._on_preprocess_changed)
+        blur_row.addWidget(self._pp_blur_cb)
+        blur_row.addWidget(CaptionLabel("核大小:"))
+        self._pp_blur_ksize = SpinBox()
+        self._pp_blur_ksize.setRange(3, 31)
+        self._pp_blur_ksize.setSingleStep(2)
+        self._pp_blur_ksize.setValue(5)
+        self._pp_blur_ksize.valueChanged.connect(self._on_preprocess_changed)
+        blur_row.addWidget(self._pp_blur_ksize)
+        blur_row.addStretch()
+        left_layout.addLayout(blur_row)
+
+        bin_row = QHBoxLayout()
+        self._pp_binary_cb = CheckBox("二值化")
+        self._pp_binary_cb.stateChanged.connect(self._on_preprocess_changed)
+        bin_row.addWidget(self._pp_binary_cb)
+        bin_row.addWidget(CaptionLabel("阈值:"))
+        self._pp_binary_thresh = SpinBox()
+        self._pp_binary_thresh.setRange(0, 255)
+        self._pp_binary_thresh.setValue(127)
+        self._pp_binary_thresh.valueChanged.connect(self._on_preprocess_changed)
+        bin_row.addWidget(self._pp_binary_thresh)
+        self._pp_binary_inv_cb = CheckBox("反向")
+        self._pp_binary_inv_cb.stateChanged.connect(self._on_preprocess_changed)
+        bin_row.addWidget(self._pp_binary_inv_cb)
+        bin_row.addStretch()
+        left_layout.addLayout(bin_row)
+
+        adapt_row = QHBoxLayout()
+        self._pp_adaptive_cb = CheckBox("自适应二值化")
+        self._pp_adaptive_cb.stateChanged.connect(self._on_preprocess_changed)
+        adapt_row.addWidget(self._pp_adaptive_cb)
+        adapt_row.addWidget(CaptionLabel("块大小:"))
+        self._pp_adaptive_block = SpinBox()
+        self._pp_adaptive_block.setRange(3, 99)
+        self._pp_adaptive_block.setSingleStep(2)
+        self._pp_adaptive_block.setValue(11)
+        self._pp_adaptive_block.valueChanged.connect(self._on_preprocess_changed)
+        adapt_row.addWidget(self._pp_adaptive_block)
+        adapt_row.addWidget(CaptionLabel("C:"))
+        self._pp_adaptive_c = SpinBox()
+        self._pp_adaptive_c.setRange(-20, 20)
+        self._pp_adaptive_c.setValue(2)
+        self._pp_adaptive_c.valueChanged.connect(self._on_preprocess_changed)
+        adapt_row.addWidget(self._pp_adaptive_c)
+        adapt_row.addStretch()
+        left_layout.addLayout(adapt_row)
+
+        canny_row = QHBoxLayout()
+        self._pp_canny_cb = CheckBox("Canny 边缘检测")
+        self._pp_canny_cb.stateChanged.connect(self._on_preprocess_changed)
+        canny_row.addWidget(self._pp_canny_cb)
+        canny_row.addWidget(CaptionLabel("低阈值:"))
+        self._pp_canny_low = SpinBox()
+        self._pp_canny_low.setRange(0, 500)
+        self._pp_canny_low.setValue(50)
+        self._pp_canny_low.valueChanged.connect(self._on_preprocess_changed)
+        canny_row.addWidget(self._pp_canny_low)
+        canny_row.addWidget(CaptionLabel("高阈值:"))
+        self._pp_canny_high = SpinBox()
+        self._pp_canny_high.setRange(0, 500)
+        self._pp_canny_high.setValue(150)
+        self._pp_canny_high.valueChanged.connect(self._on_preprocess_changed)
+        canny_row.addWidget(self._pp_canny_high)
+        canny_row.addStretch()
+        left_layout.addLayout(canny_row)
+
+        roi_row = QHBoxLayout()
+        self._pp_roi_cb = CheckBox("限定搜索区域 (ROI)")
+        self._pp_roi_cb.stateChanged.connect(self._on_preprocess_changed)
+        roi_row.addWidget(self._pp_roi_cb)
+
+        self._pp_roi_draw_btn = PushButton("绘制")
+        self._pp_roi_draw_btn.setIcon(FIF.EDIT)
+        self._pp_roi_draw_btn.clicked.connect(self._on_draw_roi)
+        roi_row.addWidget(self._pp_roi_draw_btn)
+
+        for lbl_text, attr_name in [
+            ("x:", "_pp_roi_x"),
+            ("y:", "_pp_roi_y"),
+            ("w:", "_pp_roi_w"),
+            ("h:", "_pp_roi_h"),
+        ]:
+            roi_row.addWidget(CaptionLabel(lbl_text))
+            sb = SpinBox()
+            sb.setRange(0, 9999)
+            sb.setValue(0)
+            sb.valueChanged.connect(self._on_preprocess_changed)
+            setattr(self, attr_name, sb)
+            roi_row.addWidget(sb)
+        roi_row.addStretch()
+        left_layout.addLayout(roi_row)
 
         splitter.addWidget(left)
 
@@ -564,6 +740,37 @@ class TemplateEditorDialog(QDialog):
     def get_image_path(self) -> str:
         return self._image_path
 
+    def get_preprocess_config(self) -> PreprocessConfig:
+        config = PreprocessConfig()
+        config.to_grayscale = self._pp_grayscale_cb.isChecked()
+
+        if self._pp_blur_cb.isChecked():
+            config.gaussian_blur_ksize = self._pp_blur_ksize.value()
+
+        if self._pp_adaptive_cb.isChecked():
+            config.use_adaptive_threshold = True
+            config.adaptive_block_size = self._pp_adaptive_block.value()
+            config.adaptive_c = self._pp_adaptive_c.value()
+            config.binary_inverse = self._pp_binary_inv_cb.isChecked()
+        elif self._pp_binary_cb.isChecked():
+            config.binary_threshold = self._pp_binary_thresh.value()
+            config.binary_inverse = self._pp_binary_inv_cb.isChecked()
+
+        if self._pp_canny_cb.isChecked():
+            config.canny_enabled = True
+            config.canny_low = self._pp_canny_low.value()
+            config.canny_high = self._pp_canny_high.value()
+
+        if self._pp_roi_cb.isChecked():
+            x = self._pp_roi_x.value()
+            y = self._pp_roi_y.value()
+            w = self._pp_roi_w.value()
+            h = self._pp_roi_h.value()
+            if w > 0 and h > 0:
+                config.target_roi = (x, y, w, h)
+
+        return config
+
     # ------------------------------------------------------------------
     # Selection feedback
     # ------------------------------------------------------------------
@@ -578,6 +785,78 @@ class TemplateEditorDialog(QDialog):
 
     def _on_zoom_changed(self, zoom: float):
         self._zoom_label.setText(f"缩放: {zoom * 100:.0f}%")
+
+    # ------------------------------------------------------------------
+    # Preprocessing preview (displayed in the crop widget)
+    # ------------------------------------------------------------------
+
+    def _on_preprocess_changed(self):
+        self._update_crop_display()
+
+    def _update_crop_display(self):
+        """根据当前预处理选项更新裁剪控件的显示图像。"""
+        if self._source_image is None:
+            return
+        config = self.get_preprocess_config()
+        has_any = (
+            config.needs_grayscale
+            or config.gaussian_blur_ksize > 0
+            or config.canny_enabled
+        )
+        if has_any:
+            processed = TemplateMatcher.preprocess_image(self._source_image, config)
+            self._crop_widget.set_display_override(processed)
+        else:
+            self._crop_widget.set_display_override(None)
+
+    # ------------------------------------------------------------------
+    # ROI drawing
+    # ------------------------------------------------------------------
+
+    def _on_draw_roi(self):
+        row = self._test_list.currentRow()
+        if row < 0 and self._test_image_paths:
+            row = 0
+
+        test_path = ""
+        if row >= 0 and self._test_image_paths:
+            test_path = self._test_image_paths[row]
+            img = imread_unicode(test_path)
+        else:
+            # 没有测试图时回退到模板原图，保证 ROI 绘制入口始终可用
+            img = self._source_image.copy() if self._source_image is not None else None
+
+        if img is None:
+            self._test_result_label.setText("无法读取用于绘制 ROI 的图片")
+            return
+
+        current_roi = None
+        if self._pp_roi_cb.isChecked():
+            x = self._pp_roi_x.value()
+            y = self._pp_roi_y.value()
+            w = self._pp_roi_w.value()
+            h = self._pp_roi_h.value()
+            if w > 0 and h > 0:
+                current_roi = (x, y, w, h)
+
+        dlg = RoiDrawDialog(img, current_roi=current_roi, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        roi = dlg.get_roi()
+        if roi:
+            x, y, w, h = roi
+            self._pp_roi_cb.setChecked(True)
+            self._pp_roi_x.setValue(x)
+            self._pp_roi_y.setValue(y)
+            self._pp_roi_w.setValue(w)
+            self._pp_roi_h.setValue(h)
+        else:
+            self._pp_roi_cb.setChecked(False)
+            self._pp_roi_x.setValue(0)
+            self._pp_roi_y.setValue(0)
+            self._pp_roi_w.setValue(0)
+            self._pp_roi_h.setValue(0)
 
     # ------------------------------------------------------------------
     # Test images
@@ -641,9 +920,10 @@ class TemplateEditorDialog(QDialog):
 
         test_path = self._test_image_paths[row]
         label = self.get_label()
+        config = self.get_preprocess_config()
 
         tpl_info = TemplateMatcher.create_template_from_image(
-            cropped, label, self._image_path
+            cropped, label, self._image_path, preprocess=config
         )
         matcher = TemplateMatcher(
             threshold=self._test_threshold.value(),
