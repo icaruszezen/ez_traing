@@ -52,42 +52,9 @@ from ez_traing.prelabeling.models import BoundingBox
 from ez_traing.prelabeling.voc_writer import VOCAnnotationWriter
 from ez_traing.template_matching.matcher import TemplateMatcher, TemplateInfo, imread_unicode
 from ez_traing.template_matching.worker import TemplateMatchingStats, TemplateMatchingWorker
+from ez_traing.ui.workers import ImageScanWorker as _ImageScanWorker
 
 logger = logging.getLogger(__name__)
-
-
-# ======================================================================
-# Image scan worker (reused pattern from prelabeling_page)
-# ======================================================================
-
-
-class _ImageScanWorker(QThread):
-    finished = pyqtSignal(str, list, str, float)
-
-    def __init__(self, project_id: str, directory: str):
-        super().__init__()
-        self._project_id = project_id
-        self._directory = directory
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-
-    def run(self):
-        t0 = perf_counter()
-        paths: List[str] = []
-        error = ""
-        try:
-            for root, _, files in os.walk(self._directory):
-                if self._cancelled:
-                    break
-                for f in files:
-                    if Path(f).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                        paths.append(os.path.join(root, f))
-            paths.sort()
-        except OSError as e:
-            error = str(e)
-        self.finished.emit(self._project_id, paths, error, perf_counter() - t0)
 
 
 # ======================================================================

@@ -133,6 +133,7 @@ class AppWindow(FluentWindow):
     def _create_eval_page(self):
         if self._eval_page is None:
             self._eval_page = EvalPage(self)
+            self._eval_page.set_project_manager(self.dataset_page.project_manager)
         return self._eval_page
 
     def _create_settings_page(self):

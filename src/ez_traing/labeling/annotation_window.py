@@ -4,7 +4,7 @@ import sys
 import types
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QRect, QSize, QEvent, QPointF
+from PyQt5.QtCore import Qt, QRect, QSize, QEvent, QPointF, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette
 from PyQt5.QtWidgets import (
     QAction,
@@ -610,6 +610,8 @@ class PredefinedLabelsDialog(QDialog):
 
 
 class AnnotationWindow(labelimg_module.MainWindow):
+    file_loaded = pyqtSignal()
+
     def __init__(
         self,
         default_filename=None,
@@ -635,6 +637,11 @@ class AnnotationWindow(labelimg_module.MainWindow):
         self._compact_right_dock_lists()
         self._setup_edit_labels_menu()
         self._setup_copy_annotations_menu()
+
+    def load_file(self, file_path=None):
+        result = super().load_file(file_path)
+        self.file_loaded.emit()
+        return result
 
     def _setup_dock_title_bars(self):
         """自定义右侧 Dock 标题栏，避免文字裁切"""

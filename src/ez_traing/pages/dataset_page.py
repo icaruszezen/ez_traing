@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -47,18 +48,14 @@ from qfluentwidgets import (
     ProgressBar,
 )
 
-from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
+from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS, get_config_dir
+from ez_traing.ui.workers import ThumbnailLoader
 
-# 项目配置文件路径
-def _get_config_dir() -> Path:
-    """获取配置目录"""
-    config_dir = Path.home() / ".ez_traing"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
+logger = logging.getLogger(__name__)
+
 
 def _get_projects_file() -> Path:
-    """获取项目配置文件路径"""
-    return _get_config_dir() / "datasets.json"
+    return get_config_dir() / "datasets.json"
 
 
 @dataclass
@@ -103,7 +100,7 @@ class ProjectManager:
                         proj = DatasetProject(**item)
                         self.projects[proj.id] = proj
             except Exception:
-                pass
+                logger.exception("Failed to load project config from %s", config_file)
     
     def _save(self):
         """保存项目配置"""
@@ -306,40 +303,6 @@ class ImageScanner(QThread):
         stats.label_counts = dict(label_counter)
         
         self.finished.emit(image_infos, stats)
-    
-    def cancel(self):
-        self._is_cancelled = True
-
-
-class ThumbnailLoader(QThread):
-    """异步缩略图加载线程 - 使用 QImage 避免线程安全问题"""
-    thumbnail_loaded = pyqtSignal(str, QImage)  # path, image (QImage 可跨线程)
-    all_loaded = pyqtSignal()
-    
-    def __init__(self, image_paths: List[str], thumbnail_size: int = 120):
-        super().__init__()
-        self.image_paths = image_paths
-        self.thumbnail_size = thumbnail_size
-        self._is_cancelled = False
-    
-    def run(self):
-        for path in self.image_paths:
-            if self._is_cancelled:
-                break
-            try:
-                # 使用 QImage 而非 QPixmap（QImage 是线程安全的）
-                image = QImage(path)
-                if not image.isNull():
-                    scaled = image.scaled(
-                        self.thumbnail_size, 
-                        self.thumbnail_size,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
-                    self.thumbnail_loaded.emit(path, scaled)
-            except Exception:
-                pass
-        self.all_loaded.emit()
     
     def cancel(self):
         self._is_cancelled = True
@@ -774,7 +737,7 @@ class ImagePreviewWidget(QFrame):
         # 检查 YOLO 格式标注 (.txt)
         txt_path = path.with_suffix(".txt")
         if txt_path.exists():
-            with open(txt_path, "r") as f:
+            with open(txt_path, "r", encoding="utf-8") as f:
                 lines = [l for l in f.readlines() if l.strip()]
                 if lines:
                     return f"已标注 (YOLO, {len(lines)} 个对象)"

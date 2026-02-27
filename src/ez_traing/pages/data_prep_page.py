@@ -31,6 +31,7 @@ from qfluentwidgets import (
     TitleLabel,
 )
 
+from ez_traing.common.constants import open_path
 from ez_traing.data_prep.augmentation import get_augmentation_specs
 from ez_traing.data_prep.models import DataPrepConfig, DataPrepSummary
 from ez_traing.data_prep.pipeline import DataPrepPipeline
@@ -601,7 +602,7 @@ class DataPrepPage(QWidget):
     def _open_output_dir(self):
         path = self.output_dir_edit.text().strip()
         if path and os.path.isdir(path):
-            os.startfile(path)
+            open_path(path)
 
     def _on_start_clicked(self):
         if self._project_manager is None:

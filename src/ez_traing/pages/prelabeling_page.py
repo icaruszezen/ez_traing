@@ -41,6 +41,7 @@ from qfluentwidgets import (
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 from ez_traing.prelabeling.config import APIConfigManager
+from ez_traing.ui.workers import ImageScanWorker as ProjectImageScanWorker
 from ez_traing.prelabeling.engine import PrelabelingWorker, validate_prelabeling_input
 from ez_traing.prelabeling.models import DetectionMode, InferenceBackend, PrelabelingStats
 from ez_traing.prelabeling.vision_service import VisionModelService
@@ -277,43 +278,6 @@ class ReferenceImagePanel(QWidget):
         item.setData(Qt.UserRole, path)
 
         self._list_widget.addItem(item)
-
-
-class ProjectImageScanWorker(QThread):
-    """项目图片扫描后台线程。"""
-
-    finished = pyqtSignal(str, list, str, float)  # project_id, image_paths, error, elapsed_sec
-
-    def __init__(self, project_id: str, directory: str):
-        super().__init__()
-        self._project_id = project_id
-        self._directory = directory
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def run(self) -> None:
-        started_at = perf_counter()
-        image_paths: List[str] = []
-        error = ""
-        try:
-            for root, _, files in os.walk(self._directory):
-                if self._cancelled:
-                    break
-                for file_name in files:
-                    if Path(file_name).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                        image_paths.append(os.path.join(root, file_name))
-            image_paths.sort()
-        except OSError as e:
-            error = str(e)
-
-        self.finished.emit(
-            self._project_id,
-            image_paths,
-            error,
-            perf_counter() - started_at,
-        )
 
 
 class PrelabelingPage(QWidget):

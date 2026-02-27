@@ -3,13 +3,9 @@ YOLO 训练页面
 功能：训练配置、启动/停止、日志显示、权重管理
 """
 
-import io
 import os
-import re
 import sys
 import yaml
-import subprocess
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
@@ -45,48 +41,11 @@ from qfluentwidgets import (
     ProgressBar,
 )
 
-def _get_config_dir() -> Path:
-    """获取配置目录"""
-    config_dir = Path.home() / ".ez_traing"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
+from ez_traing.common.constants import get_config_dir, detect_devices, strip_ansi, open_path
 
 
 def _get_default_train_folder() -> str:
-    """获取数据准备页面默认训练目录"""
     return str(Path.home() / ".ez_traing" / "prepared_dataset")
-
-
-def _detect_devices() -> List[tuple]:
-    """
-    检测可用的计算设备
-    返回: [(device_id, display_name), ...]
-    """
-    devices = [("cpu", "CPU")]
-    
-    try:
-        import torch
-        if torch.cuda.is_available():
-            gpu_count = torch.cuda.device_count()
-            for i in range(gpu_count):
-                name = torch.cuda.get_device_name(i)
-                # 获取显存信息
-                props = torch.cuda.get_device_properties(i)
-                memory_gb = props.total_memory / (1024 ** 3)
-                display = f"GPU {i}: {name} ({memory_gb:.1f}GB)"
-                devices.insert(0, (str(i), display))  # GPU 放在前面
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    
-    return devices
-
-
-def _strip_ansi(text: str) -> str:
-    """去除 ANSI 转义序列"""
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
 
 
 class YoloTrainThread(QThread):
@@ -286,7 +245,7 @@ class ConfigPanel(CardWidget):
         output_layout.addWidget(browse_btn)
         layout.addLayout(output_layout)
         
-        self._output_dir = str(_get_config_dir() / "runs")
+        self._output_dir = str(get_config_dir() / "runs")
         
         layout.addStretch()
         
@@ -305,7 +264,7 @@ class ConfigPanel(CardWidget):
     def _populate_devices(self):
         """填充可用设备列表"""
         self.device_combo.clear()
-        devices = _detect_devices()
+        devices = detect_devices()
         for device_id, display_name in devices:
             self.device_combo.addItem(display_name, device_id)
     
@@ -445,7 +404,7 @@ class LogPanel(CardWidget):
     
     def append_log(self, text: str):
         """追加日志"""
-        text = _strip_ansi(text)
+        text = strip_ansi(text)
         self._log_buffer.append(text)
         if not self._log_flush_timer.isActive():
             self._log_flush_timer.start()
@@ -489,7 +448,7 @@ class WeightPanel(CardWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._runs_dir = str(_get_config_dir() / "runs")
+        self._runs_dir = str(get_config_dir() / "runs")
         self._init_ui()
         self._refresh_weights()
     
@@ -595,12 +554,11 @@ class WeightPanel(CardWidget):
         selected = self.run_list.selectedItems()
         if selected:
             run_dir = selected[0].data(Qt.UserRole)
-            os.startfile(run_dir)
+            open_path(run_dir)
         else:
-            # 打开 runs 目录
             runs_path = Path(self._runs_dir)
             if runs_path.exists():
-                os.startfile(str(runs_path))
+                open_path(str(runs_path))
     
     def set_runs_dir(self, dir_path: str):
         """设置 runs 目录"""

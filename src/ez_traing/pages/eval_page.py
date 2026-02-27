@@ -45,36 +45,8 @@ from qfluentwidgets import (
 from ez_traing.evaluation.engine import EvaluationEngine
 from ez_traing.evaluation.models import EvalConfig, EvalResult
 from ez_traing.evaluation.report_generator import export_reports
+from ez_traing.common.constants import get_config_dir, detect_devices, strip_ansi, open_path
 from ez_traing.pages.dataset_page import ProjectManager, DatasetProject
-
-
-def _get_config_dir() -> Path:
-    config_dir = Path.home() / ".ez_traing"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
-
-
-def _detect_devices() -> List[tuple]:
-    devices = [("cpu", "CPU")]
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                name = torch.cuda.get_device_name(i)
-                props = torch.cuda.get_device_properties(i)
-                memory_gb = props.total_memory / (1024 ** 3)
-                devices.insert(0, (str(i), f"GPU {i}: {name} ({memory_gb:.1f}GB)"))
-    except Exception:
-        pass
-    return devices
-
-
-def _strip_ansi(text: str) -> str:
-    import re
-
-    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    return ansi_escape.sub("", text)
 
 
 class YoloEvalThread(QThread):
@@ -132,15 +104,18 @@ class EvalConfigPanel(CardWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._project_manager = ProjectManager()
-        self._runs_dir = _get_config_dir() / "runs"
+        self._project_manager: Optional[ProjectManager] = None
+        self._runs_dir = get_config_dir() / "runs"
         self._output_root = self._runs_dir / "val"
         self._custom_model_path = ""
         self._is_running = False
 
         self._init_ui()
-        self._refresh_datasets()
         self._refresh_train_runs()
+
+    def set_project_manager(self, manager: ProjectManager):
+        self._project_manager = manager
+        self._refresh_datasets()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -267,7 +242,7 @@ class EvalConfigPanel(CardWidget):
         device_layout = QHBoxLayout()
         device_layout.addWidget(BodyLabel("Device:", self))
         self.device_combo = ComboBox(self)
-        for device_id, display in _detect_devices():
+        for device_id, display in detect_devices():
             self.device_combo.addItem(display, device_id)
         device_layout.addWidget(self.device_combo)
         layout.addLayout(device_layout)
@@ -311,7 +286,8 @@ class EvalConfigPanel(CardWidget):
         self._refresh_model_hint()
 
     def _refresh_datasets(self):
-        self._project_manager = ProjectManager()
+        if self._project_manager is None:
+            return
         self.dataset_combo.clear()
         for proj in self._project_manager.get_all_projects():
             self.dataset_combo.addItem(proj.name, proj.id)
@@ -513,7 +489,7 @@ class EvalLogPanel(CardWidget):
         layout.addWidget(self.log_text, 1)
 
     def append_log(self, text: str):
-        text = _strip_ansi(text)
+        text = strip_ansi(text)
         timestamp = datetime.now().strftime("%H:%M:%S")
         self._log_buffer.append(f"[{timestamp}] {text}")
         if not self._log_flush_timer.isActive():
@@ -675,11 +651,11 @@ class EvalResultPanel(CardWidget):
 
     def _open_dir(self):
         if self._save_dir and os.path.exists(self._save_dir):
-            os.startfile(self._save_dir)
+            open_path(self._save_dir)
 
     def _open_image_file(self, image_path: str):
         if image_path and os.path.exists(image_path):
-            os.startfile(image_path)
+            open_path(image_path)
 
     def clear_result(self):
         self._save_dir = ""
@@ -745,6 +721,9 @@ class EvalPage(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
         main_layout.addWidget(splitter, 1)
+
+    def set_project_manager(self, manager):
+        self.config_panel.set_project_manager(manager)
 
     def _connect_signals(self):
         self.config_panel.start_eval.connect(self._start_eval)
@@ -831,7 +810,7 @@ class EvalPage(QWidget):
                 )
             return
 
-        output_dir = self._last_result.save_dir or str(_get_config_dir() / "runs" / "val")
+        output_dir = self._last_result.save_dir or str(get_config_dir() / "runs" / "val")
         try:
             report_files = export_reports(self._last_result, self._last_config, output_dir)
             self.log_panel.append_log(f"[INFO] 已导出报告: {report_files.get('metrics_json', '')}")
@@ -865,7 +844,7 @@ class EvalPage(QWidget):
         target_dir = QFileDialog.getExistingDirectory(
             self,
             "选择导出目录",
-            self._last_result.save_dir or str(_get_config_dir() / "runs" / "val"),
+            self._last_result.save_dir or str(get_config_dir() / "runs" / "val"),
         )
         if not target_dir:
             return

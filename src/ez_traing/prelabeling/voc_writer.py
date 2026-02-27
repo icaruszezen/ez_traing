@@ -4,12 +4,15 @@ import sys
 import os
 import threading
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 
 from ez_traing.prelabeling.models import BoundingBox
+
+_CACHE_MAX_SIZE = 512
 
 # 确保 labelImg 的 libs 模块可被导入
 _LABELIMG_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "labelImg"
@@ -22,9 +25,15 @@ from libs.pascal_voc_io import PascalVocWriter
 class VOCAnnotationWriter:
     """VOC 标注文件写入器"""
 
-    _annotation_cache: Dict[Tuple[str, int], List[BoundingBox]] = {}
-    _image_size_cache: Dict[Tuple[str, int], Tuple[int, int, int]] = {}
+    _annotation_cache: OrderedDict = OrderedDict()
+    _image_size_cache: OrderedDict = OrderedDict()
     _cache_lock = threading.Lock()
+
+    @classmethod
+    def _cache_put(cls, cache: OrderedDict, key, value) -> None:
+        cache[key] = value
+        while len(cache) > _CACHE_MAX_SIZE:
+            cache.popitem(last=False)
 
     @staticmethod
     def _deduplicate_boxes(boxes: List[BoundingBox]) -> List[BoundingBox]:
@@ -126,10 +135,7 @@ class VOCAnnotationWriter:
             )
 
         with self._cache_lock:
-            stale_keys = [k for k in self._annotation_cache.keys() if k[0] == str(path) and k != cache_key]
-            for key in stale_keys:
-                self._annotation_cache.pop(key, None)
-            self._annotation_cache[cache_key] = boxes
+            self._cache_put(self._annotation_cache, cache_key, boxes)
         return boxes
 
     def save_merged_annotation(
@@ -178,8 +184,5 @@ class VOCAnnotationWriter:
         size = (height, width, depth)
 
         with self._cache_lock:
-            stale_keys = [k for k in self._image_size_cache.keys() if k[0] == str(path) and k != cache_key]
-            for key in stale_keys:
-                self._image_size_cache.pop(key, None)
-            self._image_size_cache[cache_key] = size
+            self._cache_put(self._image_size_cache, cache_key, size)
         return size

@@ -42,6 +42,7 @@ from qfluentwidgets import (
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 from ez_traing.labeling.annotation_window import AnnotationWindow
+from ez_traing.ui.workers import ImageScanWorker, ThumbnailLoader
 
 _LABELIMG_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "labelImg"
 if str(_LABELIMG_ROOT) not in sys.path:
@@ -126,40 +127,6 @@ def _read_existing_yolo_shapes(
         return shapes
     except Exception:
         return []
-
-
-class ThumbnailLoader(QThread):
-    """异步缩略图加载"""
-
-    thumbnail_loaded = pyqtSignal(str, QImage)
-    all_loaded = pyqtSignal()
-
-    def __init__(self, image_paths: List[str], thumbnail_size: int = 80):
-        super().__init__()
-        self.image_paths = image_paths
-        self.thumbnail_size = thumbnail_size
-        self._is_cancelled = False
-
-    def run(self):
-        for path in self.image_paths:
-            if self._is_cancelled:
-                break
-            try:
-                image = QImage(path)
-                if not image.isNull():
-                    scaled = image.scaled(
-                        self.thumbnail_size,
-                        self.thumbnail_size,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation,
-                    )
-                    self.thumbnail_loaded.emit(path, scaled)
-            except Exception:
-                pass
-        self.all_loaded.emit()
-
-    def cancel(self):
-        self._is_cancelled = True
 
 
 class BatchApplyWorker(QThread):
@@ -445,9 +412,11 @@ class BatchImageListPanel(CardWidget):
         """清除所有标记"""
         self._mismatch_paths.clear()
         self._success_paths.clear()
-        for path, item in self._path_to_item.items():
+        for item in self._path_to_item.values():
             item.setBackground(QBrush())
-            item.setText(Path(path).name)
+            original_path = item.data(Qt.UserRole)
+            if original_path:
+                item.setText(Path(original_path).name)
 
     def _show_context_menu(self, pos):
         """右键菜单"""
@@ -558,25 +527,6 @@ class BatchImageListPanel(CardWidget):
         self._update_count_label()
 
 
-class ImageScanWorker(QThread):
-    """扫描目录中的图片"""
-
-    finished = pyqtSignal(list)
-
-    def __init__(self, directory: str):
-        super().__init__()
-        self._directory = directory
-
-    def run(self):
-        paths: List[str] = []
-        for root, _, files in os.walk(self._directory):
-            for f in files:
-                if Path(f).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                    paths.append(os.path.join(root, f))
-        paths.sort()
-        self.finished.emit(paths)
-
-
 class BatchAnnotationPage(QWidget):
     """批量标注页面"""
 
@@ -612,7 +562,7 @@ class BatchAnnotationPage(QWidget):
         # 左侧: 标注窗口
         self._annotation_window = AnnotationWindow(parent=self)
         self._syncing_selection = False
-        self._wrap_annotation_load_file()
+        self._annotation_window.file_loaded.connect(self._after_annotation_load)
         content_splitter.addWidget(self._annotation_window)
 
         # 右侧: 图片列表面板
@@ -747,11 +697,11 @@ class BatchAnnotationPage(QWidget):
 
         self._current_directory = proj.directory
         self.status_label.setText(f"正在扫描: {proj.name}...")
-        self._scan_worker = ImageScanWorker(proj.directory)
+        self._scan_worker = ImageScanWorker(proj.id, proj.directory)
         self._scan_worker.finished.connect(self._on_scan_finished)
         self._scan_worker.start()
 
-    def _on_scan_finished(self, paths: List[str]):
+    def _on_scan_finished(self, _project_id: str, paths: List[str], _error: str, _elapsed: float):
         self.image_panel.set_images(paths)
         self.status_label.setText(f"已加载 {len(paths)} 张图片")
 
@@ -798,17 +748,6 @@ class BatchAnnotationPage(QWidget):
         self._syncing_selection = True
         self._load_first_image(path, self._current_directory)
         self._syncing_selection = False
-
-    def _wrap_annotation_load_file(self):
-        """包装 AnnotationWindow.load_file，在完成后同步右侧列表"""
-        original = self._annotation_window.load_file
-
-        def wrapped(file_path=None):
-            result = original(file_path)
-            self._after_annotation_load()
-            return result
-
-        self._annotation_window.load_file = wrapped
 
     def _after_annotation_load(self):
         """AnnotationWindow 加载完一张图片后，同步右侧面板"""

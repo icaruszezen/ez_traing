@@ -7,14 +7,9 @@ from typing import Callable, Optional
 
 import yaml
 
+from ez_traing.common.constants import get_config_dir
 from ez_traing.evaluation.models import EvalConfig, EvalMetrics, EvalResult
 from ez_traing.evaluation.visualization import discover_yolo_plots, generate_fallback_charts
-
-
-def _get_config_dir() -> Path:
-    config_dir = Path.home() / ".ez_traing"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
 
 
 def _sanitize_name(value: str) -> str:
@@ -101,7 +96,7 @@ class EvaluationEngine:
             if not model_path.exists() or model_path.suffix.lower() != ".pt":
                 raise ValueError("请选择存在的 YOLO 权重文件（.pt）")
 
-            output_root = Path(config.output_root) if config.output_root else _get_config_dir() / "runs" / "val"
+            output_root = Path(config.output_root) if config.output_root else get_config_dir() / "runs" / "val"
             output_root.mkdir(parents=True, exist_ok=True)
             run_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_sanitize_name(config.dataset_name)}_{_sanitize_name(model_path.stem)}"
 
