@@ -664,8 +664,13 @@ class BatchAnnotationPage(QWidget):
 
         if prev_id and prev_id in self._project_ids:
             self.dataset_combo.setCurrentIndex(self._project_ids.index(prev_id))
-
-        self.dataset_combo.blockSignals(False)
+            self.dataset_combo.blockSignals(False)
+        elif self._project_ids:
+            self.dataset_combo.setCurrentIndex(0)
+            self.dataset_combo.blockSignals(False)
+            self._on_dataset_changed(0)
+        else:
+            self.dataset_combo.blockSignals(False)
 
     def _sync_dataset_combo_to_directory(self, directory: str):
         """让 ComboBox 选中对应目录的项目"""

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -46,9 +47,11 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     ProgressBar,
+    SwitchButton,
 )
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS, get_config_dir
+from ez_traing.ui.painting import begin_label_painter, draw_box_label
 from ez_traing.ui.workers import ThumbnailLoader
 
 logger = logging.getLogger(__name__)
@@ -56,6 +59,9 @@ logger = logging.getLogger(__name__)
 
 def _get_projects_file() -> Path:
     return get_config_dir() / "datasets.json"
+
+
+_SUBFOLDER_SEP = "::sub::"
 
 
 @dataclass
@@ -68,7 +74,13 @@ class DatasetProject:
     annotated_count: int = 0
     created_at: str = ""
     updated_at: str = ""
-    
+    subfolder: Optional[str] = None
+    parent_id: Optional[str] = None
+
+    @property
+    def is_virtual(self) -> bool:
+        return self.subfolder is not None and self.parent_id is not None
+
     @classmethod
     def create(cls, name: str, directory: str) -> "DatasetProject":
         """创建新项目"""
@@ -84,11 +96,18 @@ class DatasetProject:
 
 class ProjectManager:
     """项目管理器"""
-    
+
     def __init__(self):
         self.projects: Dict[str, DatasetProject] = {}
+        self._subfolder_modes: Dict[str, bool] = {}
+        self._subfolder_cache: Dict[str, List[str]] = {}
+        self._subfolder_counts: Dict[str, Dict[str, int]] = {}
         self._load()
-    
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
     def _load(self):
         """加载项目配置"""
         config_file = _get_projects_file()
@@ -96,45 +115,173 @@ class ProjectManager:
             try:
                 with open(config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    known_fields = {f.name for f in DatasetProject.__dataclass_fields__.values()}
                     for item in data.get("projects", []):
-                        proj = DatasetProject(**item)
+                        filtered = {k: v for k, v in item.items() if k in known_fields}
+                        proj = DatasetProject(**filtered)
                         self.projects[proj.id] = proj
+                    self._subfolder_modes = data.get("subfolder_modes", {})
             except Exception:
                 logger.exception("Failed to load project config from %s", config_file)
-    
+
     def _save(self):
-        """保存项目配置"""
+        """保存项目配置（排除虚拟条目）"""
         config_file = _get_projects_file()
+        real_projects = [p for p in self.projects.values() if not p.is_virtual]
+        serialised = []
+        for p in real_projects:
+            d = asdict(p)
+            d.pop("subfolder", None)
+            d.pop("parent_id", None)
+            serialised.append(d)
         data = {
-            "projects": [asdict(p) for p in self.projects.values()]
+            "projects": serialised,
+            "subfolder_modes": self._subfolder_modes,
         }
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
     def add_project(self, project: DatasetProject):
         """添加项目"""
         self.projects[project.id] = project
         self._save()
-    
+
     def remove_project(self, project_id: str):
         """删除项目"""
         if project_id in self.projects:
             del self.projects[project_id]
+            self._subfolder_modes.pop(project_id, None)
+            self._subfolder_cache.pop(project_id, None)
             self._save()
-    
+
     def update_project(self, project: DatasetProject):
         """更新项目"""
+        if project.is_virtual:
+            return
         project.updated_at = datetime.now().isoformat()
         self.projects[project.id] = project
         self._save()
-    
+
+    # ------------------------------------------------------------------
+    # Query (with virtual subfolder expansion)
+    # ------------------------------------------------------------------
+
     def get_project(self, project_id: str) -> Optional[DatasetProject]:
-        """获取项目"""
+        """获取项目，支持虚拟子文件夹 ID"""
+        if _SUBFOLDER_SEP in project_id:
+            parent_id, subfolder = project_id.split(_SUBFOLDER_SEP, 1)
+            parent = self.projects.get(parent_id)
+            if parent is None:
+                return None
+            if parent_id not in self._subfolder_counts:
+                self.detect_subfolders(parent_id)
+            return self._make_virtual(parent, subfolder)
         return self.projects.get(project_id)
-    
+
     def get_all_projects(self) -> List[DatasetProject]:
-        """获取所有项目"""
-        return list(self.projects.values())
+        """获取所有项目；启用子文件夹模式的项目会展开为虚拟条目"""
+        result: List[DatasetProject] = []
+        for proj in self.projects.values():
+            if self._subfolder_modes.get(proj.id, False):
+                subfolders = self.detect_subfolders(proj.id)
+                for sf in subfolders:
+                    result.append(self._make_virtual(proj, sf))
+            else:
+                result.append(proj)
+        return result
+
+    # ------------------------------------------------------------------
+    # Subfolder mode helpers
+    # ------------------------------------------------------------------
+
+    def detect_subfolders(self, project_id: str) -> List[str]:
+        """检测项目目录的直接子文件夹（含图片的），同时统计图片数，缓存结果"""
+        cached = self._subfolder_cache.get(project_id)
+        if cached is not None:
+            return cached
+
+        proj = self.projects.get(project_id)
+        if proj is None or not os.path.isdir(proj.directory):
+            return []
+
+        base = Path(proj.directory)
+        subfolders: List[str] = []
+        counts: Dict[str, int] = {}
+
+        root_count = sum(
+            1 for f in base.iterdir()
+            if f.is_file() and f.suffix.lower() in SUPPORTED_IMAGE_FORMATS
+        )
+        if root_count > 0:
+            subfolders.append("(root)")
+            counts["(root)"] = root_count
+
+        for entry in sorted(base.iterdir()):
+            if not entry.is_dir():
+                continue
+            n = sum(
+                1 for _, _, files in os.walk(str(entry))
+                for fn in files
+                if Path(fn).suffix.lower() in SUPPORTED_IMAGE_FORMATS
+            )
+            if n > 0:
+                subfolders.append(entry.name)
+                counts[entry.name] = n
+
+        self._subfolder_cache[project_id] = subfolders
+        self._subfolder_counts[project_id] = counts
+        return subfolders
+
+    def has_subfolders(self, project_id: str) -> bool:
+        subs = self.detect_subfolders(project_id)
+        if not subs:
+            return False
+        if subs == ["(root)"]:
+            return False
+        return True
+
+    def set_subfolder_mode(self, project_id: str, enabled: bool):
+        self._subfolder_modes[project_id] = enabled
+        self._save()
+
+    def is_subfolder_mode(self, project_id: str) -> bool:
+        return self._subfolder_modes.get(project_id, False)
+
+    def clear_subfolder_cache(self, project_id: Optional[str] = None):
+        if project_id:
+            self._subfolder_cache.pop(project_id, None)
+            self._subfolder_counts.pop(project_id, None)
+        else:
+            self._subfolder_cache.clear()
+            self._subfolder_counts.clear()
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _make_virtual(self, parent: DatasetProject, subfolder: str) -> DatasetProject:
+        """根据父项目和子文件夹名生成虚拟条目"""
+        if subfolder == "(root)":
+            directory = parent.directory
+        else:
+            directory = str(Path(parent.directory) / subfolder)
+        counts = self._subfolder_counts.get(parent.id, {})
+        image_count = counts.get(subfolder, 0)
+        return DatasetProject(
+            id=f"{parent.id}{_SUBFOLDER_SEP}{subfolder}",
+            name=f"{parent.name}/{subfolder}",
+            directory=directory,
+            image_count=image_count,
+            annotated_count=0,
+            created_at=parent.created_at,
+            updated_at=parent.updated_at,
+            subfolder=subfolder,
+            parent_id=parent.id,
+        )
 
 
 @dataclass
@@ -167,10 +314,11 @@ class ImageScanner(QThread):
     progress = pyqtSignal(int, int)  # current, total
     finished = pyqtSignal(list, object)  # image_infos, AnnotationStats
     
-    def __init__(self, directory: str, classes_file: str = None):
+    def __init__(self, directory: str, classes_file: str = None, recursive: bool = True):
         super().__init__()
         self.directory = directory
         self.classes_file = classes_file
+        self.recursive = recursive
         self._is_cancelled = False
         self._class_names = []  # YOLO 类别名称列表
         self._voc_label_cache: Dict[tuple[str, int], List[str]] = {}
@@ -232,7 +380,6 @@ class ImageScanner(QThread):
             resolved = xml_path
             cache_key = None
         try:
-            import xml.etree.ElementTree as ET
             tree = ET.parse(resolved)
             root = tree.getroot()
             for obj in root.findall("object"):
@@ -258,10 +405,16 @@ class ImageScanner(QThread):
         self._load_classes()
         
         # 收集所有文件
-        for root, _, files in os.walk(self.directory):
-            for file in files:
-                if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                    all_files.append(os.path.join(root, file))
+        if self.recursive:
+            for root, _, files in os.walk(self.directory):
+                for file in files:
+                    if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                        all_files.append(os.path.join(root, file))
+        else:
+            for file in os.listdir(self.directory):
+                full = os.path.join(self.directory, file)
+                if os.path.isfile(full) and Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                    all_files.append(full)
         
         total = len(all_files)
         stats.total_images = total
@@ -422,11 +575,22 @@ class ProjectListWidget(CardWidget):
         if items:
             return items[0].data(Qt.UserRole)
         return None
-    
+
+    def select_project(self, project_id: str):
+        """按 ID 选中项目（不触发 project_selected 信号）"""
+        self.project_list.blockSignals(True)
+        for i in range(self.project_list.count()):
+            item = self.project_list.item(i)
+            if item.data(Qt.UserRole) == project_id:
+                self.project_list.setCurrentItem(item)
+                self.delete_btn.setEnabled(not (_SUBFOLDER_SEP in project_id))
+                break
+        self.project_list.blockSignals(False)
+
     def _on_item_clicked(self, item: QListWidgetItem):
         """项目点击"""
         project_id = item.data(Qt.UserRole)
-        self.delete_btn.setEnabled(True)
+        self.delete_btn.setEnabled(not (_SUBFOLDER_SEP in project_id))
         self.project_selected.emit(project_id)
 
 
@@ -630,21 +794,36 @@ class StatisticsPanel(CardWidget):
 class ImagePreviewWidget(QFrame):
     """图片预览组件"""
     
+    _LABEL_COLORS = [
+        (0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 165, 0),
+        (128, 0, 128), (0, 255, 255), (255, 255, 0), (255, 0, 255),
+        (0, 128, 0), (0, 0, 128), (128, 128, 0), (128, 0, 0),
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameStyle(QFrame.StyledPanel)
         self.setMinimumWidth(280)
         self._setup_ui()
         self._current_path: Optional[str] = None
+        self._project_directory: Optional[str] = None
+        self._class_names: List[str] = []
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         
-        # 标题
+        # 标题行：标题 + 显示标注开关
+        header_layout = QHBoxLayout()
         self.title_label = SubtitleLabel("图片预览")
-        layout.addWidget(self.title_label)
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+        self.annotation_switch = SwitchButton("标注")
+        self.annotation_switch.setChecked(False)
+        self.annotation_switch.checkedChanged.connect(self._on_annotation_toggle)
+        header_layout.addWidget(self.annotation_switch)
+        layout.addLayout(header_layout)
         
         # 图片预览区域
         self.preview_label = QLabel()
@@ -694,6 +873,14 @@ class ImagePreviewWidget(QFrame):
             self._clear_info()
             return
         
+        img_w, img_h = pixmap.width(), pixmap.height()
+
+        if self.annotation_switch.isChecked():
+            annotations = self._read_annotations(image_path, img_w, img_h)
+            if annotations:
+                pixmap = pixmap.copy()
+                self._draw_annotations(pixmap, annotations)
+
         # 缩放显示
         preview_size = self.preview_label.size()
         scaled = pixmap.scaled(
@@ -710,7 +897,7 @@ class ImagePreviewWidget(QFrame):
         
         self.file_name_label.setText(f"文件名: {file_path.name}")
         self.file_size_label.setText(f"大小: {self._format_size(file_stat.st_size)}")
-        self.image_size_label.setText(f"尺寸: {pixmap.width()} × {pixmap.height()}")
+        self.image_size_label.setText(f"尺寸: {img_w} × {img_h}")
         
         # 检查标注状态
         annotation_status = self._check_annotation_status(image_path)
@@ -752,6 +939,125 @@ class ImagePreviewWidget(QFrame):
     @property
     def current_path(self) -> Optional[str]:
         return self._current_path
+
+    @property
+    def project_directory(self) -> Optional[str]:
+        return self._project_directory
+
+    @project_directory.setter
+    def project_directory(self, value: Optional[str]):
+        if value == self._project_directory:
+            return
+        self._project_directory = value
+        self._class_names = []
+        if value:
+            self._load_class_names(value)
+
+    def _load_class_names(self, directory: str):
+        """加载 YOLO classes.txt（搜索路径同 ImageScanner）"""
+        candidates = [
+            Path(directory) / "classes.txt",
+            Path(directory) / "labels" / "classes.txt",
+            Path(directory) / ".." / "classes.txt",
+        ]
+        for p in candidates:
+            if p.exists():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        self._class_names = [line.strip() for line in f if line.strip()]
+                    return
+                except Exception:
+                    pass
+
+    def _read_annotations(self, image_path: str, img_w: int, img_h: int) -> List[dict]:
+        """读取标注文件，返回 [{"label", "xmin", "ymin", "xmax", "ymax"}, ...]
+
+        优先级与 ImageScanner 保持一致：YOLO (.txt) -> VOC (.xml)。
+        """
+        path = Path(image_path)
+        boxes: List[dict] = []
+
+        txt_path = path.with_suffix(".txt")
+        if txt_path.exists():
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) < 5:
+                            continue
+                        class_id = int(parts[0])
+                        cx = float(parts[1]) * img_w
+                        cy = float(parts[2]) * img_h
+                        w = float(parts[3]) * img_w
+                        h = float(parts[4]) * img_h
+                        if self._class_names and 0 <= class_id < len(self._class_names):
+                            label = self._class_names[class_id]
+                        else:
+                            label = f"class_{class_id}"
+                        boxes.append({
+                            "label": label,
+                            "xmin": int(cx - w / 2),
+                            "ymin": int(cy - h / 2),
+                            "xmax": int(cx + w / 2),
+                            "ymax": int(cy + h / 2),
+                        })
+            except Exception:
+                pass
+            return boxes
+
+        xml_path = path.with_suffix(".xml")
+        if xml_path.exists():
+            try:
+                tree = ET.parse(xml_path)
+                for obj in tree.getroot().findall("object"):
+                    name = (obj.findtext("name") or "").strip()
+                    bnd = obj.find("bndbox")
+                    if not name or bnd is None:
+                        continue
+                    boxes.append({
+                        "label": name,
+                        "xmin": int(float((bnd.findtext("xmin") or "0").strip())),
+                        "ymin": int(float((bnd.findtext("ymin") or "0").strip())),
+                        "xmax": int(float((bnd.findtext("xmax") or "0").strip())),
+                        "ymax": int(float((bnd.findtext("ymax") or "0").strip())),
+                    })
+            except Exception:
+                pass
+        return boxes
+
+    def _draw_annotations(self, pixmap: QPixmap, annotations: List[dict]):
+        """在 QPixmap 上绘制标注框和标签"""
+        label_set = sorted({a["label"] for a in annotations})
+        color_map = {
+            lbl: self._LABEL_COLORS[i % len(self._LABEL_COLORS)]
+            for i, lbl in enumerate(label_set)
+        }
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for ann in annotations:
+            r, g, b = color_map[ann["label"]]
+            pen = QPen(QColor(r, g, b))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(ann["xmin"], ann["ymin"],
+                             ann["xmax"] - ann["xmin"],
+                             ann["ymax"] - ann["ymin"])
+        painter.end()
+
+        label_painter = begin_label_painter(pixmap)
+        for ann in annotations:
+            bgr = tuple(reversed(color_map[ann["label"]]))
+            draw_box_label(label_painter, ann["label"],
+                           ann["xmin"], ann["ymin"], bgr)
+        label_painter.end()
+
+    def _on_annotation_toggle(self, checked: bool):
+        """开关切换时刷新预览"""
+        del checked
+        if self._current_path:
+            self.set_image(self._current_path)
 
 
 class ImageListPanel(CardWidget):
@@ -1097,31 +1403,35 @@ class DatasetPage(QWidget):
         layout = QHBoxLayout(header)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(16)
-        
-        # 标题
+
         title = TitleLabel("数据集管理")
         layout.addWidget(title)
-        
+
         layout.addStretch()
-        
-        # 刷新按钮
+
+        # 子文件夹模式开关
+        self.subfolder_switch = SwitchButton("子文件夹模式")
+        self.subfolder_switch.setChecked(False)
+        self.subfolder_switch.setEnabled(False)
+        self.subfolder_switch.setVisible(False)
+        self.subfolder_switch.checkedChanged.connect(self._on_subfolder_mode_changed)
+        layout.addWidget(self.subfolder_switch)
+
         self.refresh_btn = PushButton("刷新", self, FIF.SYNC)
         self.refresh_btn.clicked.connect(self._on_refresh_project)
         self.refresh_btn.setEnabled(False)
         layout.addWidget(self.refresh_btn)
-        
-        # 打开标注按钮
+
         self.annotate_btn = PrimaryPushButton("打开标注", self, FIF.EDIT)
         self.annotate_btn.setEnabled(False)
         self.annotate_btn.clicked.connect(self._on_annotate_clicked)
         layout.addWidget(self.annotate_btn)
-        
-        # 批量标注按钮
+
         self.batch_annotate_btn = PushButton("批量标注", self, FIF.COPY)
         self.batch_annotate_btn.setEnabled(False)
         self.batch_annotate_btn.clicked.connect(self._on_batch_annotate_clicked)
         layout.addWidget(self.batch_annotate_btn)
-        
+
         return header
     
     def _load_projects(self):
@@ -1175,9 +1485,9 @@ class DatasetPage(QWidget):
     def _on_delete_project(self):
         """删除项目"""
         project_id = self.project_list_widget.get_selected_project_id()
-        if not project_id:
+        if not project_id or _SUBFOLDER_SEP in project_id:
             return
-        
+
         project = self.project_manager.get_project(project_id)
         if not project:
             return
@@ -1192,9 +1502,16 @@ class DatasetPage(QWidget):
         
         if reply == QMessageBox.Yes:
             self.project_manager.remove_project(project_id)
-            self.project_list_widget.remove_project_item(project_id)
-            
-            if self.current_project and self.current_project.id == project_id:
+
+            # 刷新列表（删除后可能有虚拟条目也需要移除）
+            self._load_projects()
+
+            cur = self.current_project
+            needs_clear = (
+                cur is not None
+                and (cur.id == project_id or cur.parent_id == project_id)
+            )
+            if needs_clear:
                 self.current_project = None
                 self.image_infos.clear()
                 self.image_paths.clear()
@@ -1205,6 +1522,8 @@ class DatasetPage(QWidget):
                 self.refresh_btn.setEnabled(False)
                 self.annotate_btn.setEnabled(False)
                 self.batch_annotate_btn.setEnabled(False)
+                self.subfolder_switch.setVisible(False)
+                self.subfolder_switch.setEnabled(False)
                 self.status_label.setText("选择或创建数据集项目")
             
             InfoBar.success(
@@ -1226,19 +1545,55 @@ class DatasetPage(QWidget):
     def _on_refresh_project(self):
         """刷新当前项目"""
         if self.current_project:
+            real_id = (
+                self.current_project.parent_id
+                if self.current_project.is_virtual
+                else self.current_project.id
+            )
+            self.project_manager.clear_subfolder_cache(real_id)
             self._load_project(self.current_project)
-    
+
+    def _on_subfolder_mode_changed(self, checked: bool):
+        """子文件夹模式开关切换"""
+        if not self.current_project:
+            return
+
+        real_id = (
+            self.current_project.parent_id
+            if self.current_project.is_virtual
+            else self.current_project.id
+        )
+        self.project_manager.set_subfolder_mode(real_id, checked)
+
+        # 刷新左侧项目列表
+        self._load_projects()
+
+        if checked:
+            # 自动选中第一个子文件夹条目
+            subfolders = self.project_manager.detect_subfolders(real_id)
+            if subfolders:
+                first_id = f"{real_id}{_SUBFOLDER_SEP}{subfolders[0]}"
+                self.project_list_widget.select_project(first_id)
+                proj = self.project_manager.get_project(first_id)
+                if proj:
+                    self._load_project(proj)
+        else:
+            # 恢复选中原始项目
+            real_proj = self.project_manager.get_project(real_id)
+            if real_proj:
+                self.project_list_widget.select_project(real_id)
+                self._load_project(real_proj)
+
     def _load_project(self, project: DatasetProject):
         """加载项目"""
-        # 取消之前的任务
         if self._scanner and self._scanner.isRunning():
             self._scanner.cancel()
             self._scanner.wait()
-        
+
         if self._thumbnail_loader and self._thumbnail_loader.isRunning():
             self._thumbnail_loader.cancel()
             self._thumbnail_loader.wait()
-        
+
         self.current_project = project
         self.image_infos.clear()
         self.image_paths.clear()
@@ -1246,8 +1601,7 @@ class DatasetPage(QWidget):
         self.image_list_panel.clear()
         self.preview_widget.set_image(None)
         self.statistics_panel.clear()
-        
-        # 检查目录是否存在
+
         if not os.path.isdir(project.directory):
             InfoBar.error(
                 title="错误",
@@ -1256,19 +1610,29 @@ class DatasetPage(QWidget):
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=3000,
-                parent=self
+                parent=self,
             )
             self.status_label.setText("目录不存在")
             return
-        
-        # 更新UI状态
+
+        # 更新子文件夹模式开关的可见性
+        real_id = project.parent_id if project.is_virtual else project.id
+        has_subs = self.project_manager.has_subfolders(real_id)
+        self.subfolder_switch.setVisible(has_subs)
+        self.subfolder_switch.setEnabled(has_subs)
+        # 同步开关状态（不触发信号）
+        self.subfolder_switch.blockSignals(True)
+        self.subfolder_switch.setChecked(self.project_manager.is_subfolder_mode(real_id))
+        self.subfolder_switch.blockSignals(False)
+
         self.refresh_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setText(f"正在扫描: {project.name}...")
-        
-        # 启动扫描
-        self._scanner = ImageScanner(project.directory)
+
+        # (root) 虚拟条目只扫描根目录文件
+        recursive = not (project.is_virtual and project.subfolder == "(root)")
+        self._scanner = ImageScanner(project.directory, recursive=recursive)
         self._scanner.progress.connect(self._on_scan_progress)
         self._scanner.finished.connect(self._on_scan_finished)
         self._scanner.start()
@@ -1284,15 +1648,14 @@ class DatasetPage(QWidget):
         self.image_infos = sorted(image_infos, key=lambda i: i.path)
         self.image_paths = [info.path for info in self.image_infos]
         count = len(self.image_paths)
-        
-        # 更新统计面板
+
         self.statistics_panel.set_stats(stats)
-        
-        # 更新项目信息
+
         if self.current_project:
             self.current_project.image_count = count
             self.current_project.annotated_count = stats.annotated_images
-            self.project_manager.update_project(self.current_project)
+            if not self.current_project.is_virtual:
+                self.project_manager.update_project(self.current_project)
             self.project_list_widget.update_project_item(self.current_project)
         
         if count == 0:
@@ -1396,6 +1759,8 @@ class DatasetPage(QWidget):
     
     def _on_image_selected(self, image_path: str):
         """图片选择"""
+        if self.current_project:
+            self.preview_widget.project_directory = self.current_project.directory
         self.preview_widget.set_image(image_path)
         self.annotate_btn.setEnabled(True)
         selected_count = len(self.image_list_panel.get_selected_paths())
