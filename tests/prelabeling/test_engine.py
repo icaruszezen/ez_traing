@@ -420,11 +420,11 @@ class TestRun:
         original_save = w._save_voc_annotation
         call_idx = [0]
 
-        def failing_save(path, boxes):
+        def failing_save(path, boxes, **kwargs):
             call_idx[0] += 1
             if call_idx[0] == 2:
                 raise OSError("Permission denied")
-            return original_save(path, boxes)
+            return original_save(path, boxes, **kwargs)
 
         w._save_voc_annotation = failing_save
 
