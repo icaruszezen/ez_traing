@@ -2,8 +2,7 @@ name: Build & Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 permissions:
   contents: write
@@ -14,39 +13,67 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      - name: Read version from __init__.py
+        id: ver
+        shell: bash
+        run: |
+          version=$(python -c "exec(open('src/ez_traing/__init__.py').read()); print(__version__)")
+          echo "version=v${version}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: v${version}"
+
+      - name: Check if tag already exists
+        id: check_tag
+        shell: bash
+        run: |
+          if git rev-parse "${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
+        if: steps.check_tag.outputs.exists == 'false'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
       - name: Build with PyInstaller
+        if: steps.check_tag.outputs.exists == 'false'
         run: pyinstaller ez_traing.spec
 
-      - name: Extract tag version
-        id: tag
-        shell: bash
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-
       - name: Create zip archive
+        if: steps.check_tag.outputs.exists == 'false'
         shell: pwsh
-        run: Compress-Archive -Path dist\ez_traing\* -DestinationPath "ez_traing-${{ steps.tag.outputs.version }}-windows.zip"
+        run: Compress-Archive -Path dist\ez_traing\* -DestinationPath "ez_traing-${{ steps.ver.outputs.version }}-windows.zip"
+
+      - name: Create tag
+        if: steps.check_tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          git tag "${{ steps.ver.outputs.version }}"
+          git push origin "${{ steps.ver.outputs.version }}"
 
       - name: Upload build artifact
+        if: steps.check_tag.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: ez_traing-${{ steps.tag.outputs.version }}-windows
+          name: ez_traing-${{ steps.ver.outputs.version }}-windows
           path: dist/ez_traing/
 
       - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.tag.outputs.version }}
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: ${{ steps.ver.outputs.version }}
           generate_release_notes: true
-          files: ez_traing-${{ steps.tag.outputs.version }}-windows.zip
+          files: ez_traing-${{ steps.ver.outputs.version }}-windows.zip
