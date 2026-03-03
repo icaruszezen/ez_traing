@@ -355,8 +355,9 @@ class TemplateMatcher:
             new_h = max(1, int(tpl_image.shape[0] * scale))
             if new_h > target.shape[0] or new_w > target.shape[1]:
                 continue
+            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
             resized = cv2.resize(
-                tpl_image, (new_w, new_h), interpolation=cv2.INTER_AREA
+                tpl_image, (new_w, new_h), interpolation=interp
             )
             result = cv2.matchTemplate(target, resized, self.method)
             orig_w = max(1, int(tpl.width * scale))

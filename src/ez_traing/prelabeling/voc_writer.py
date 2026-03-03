@@ -157,7 +157,7 @@ class VOCAnnotationWriter:
             output_path=str(xml_path),
         )
 
-    def _get_image_size(self, image_path: str) -> Tuple[int, int, int]:
+    def get_image_size(self, image_path: str) -> Tuple[int, int, int]:
         """
         获取图片尺寸
 

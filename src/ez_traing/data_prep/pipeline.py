@@ -17,9 +17,11 @@ from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 from ez_traing.data_prep.augmentation import apply_augmentation, build_augmenter
 from ez_traing.data_prep.converter import (
     build_class_names,
+    clear_voc_cache,
     find_voc_for_image,
     load_existing_classes,
     parse_voc_boxes,
+    read_voc_image_size,
     save_classes,
     write_yolo_label,
 )
@@ -171,6 +173,8 @@ class DataPrepPipeline:
         summary.yaml_path = str(yaml_path)
         summary.classes_path = str(classes_path)
 
+        clear_voc_cache()
+
         self._emit_progress(
             progress_callback, 100, f"完成，导出 {summary.processed_images} 张图片"
         )
@@ -210,9 +214,13 @@ class DataPrepPipeline:
             mode: Optional[str] = None
             if xml_path is not None:
                 try:
-                    with Image.open(path) as img:
-                        width, height = img.size
-                        mode = img.mode
+                    xml_size = read_voc_image_size(xml_path)
+                    if xml_size is not None:
+                        width, height = xml_size
+                    else:
+                        with Image.open(path) as img:
+                            width, height = img.size
+                            mode = img.mode
                     boxes = parse_voc_boxes(xml_path, width, height)
                 except Exception as e:
                     self._log(log_callback, f"[跳过] 标注解析失败 {xml_path.name}: {e}")
@@ -323,17 +331,19 @@ class DataPrepPipeline:
                 out_img = image_dir / f"{base_stem}{base_ext}"
                 out_lbl = label_dir / f"{base_stem}.txt"
 
-                if augmenter is None and base_ext in SUPPORTED_IMAGE_FORMATS:
+                image_array = None
+                if augmenter is None:
                     shutil.copy2(sample.image_path, out_img)
                     if width is None or height is None:
                         with Image.open(sample.image_path) as pil_img:
                             width, height = pil_img.size
                 else:
                     with Image.open(sample.image_path) as pil_img:
-                        image = pil_img.convert("RGB")
+                        rgb_image = pil_img.convert("RGB")
                         if width is None or height is None:
-                            width, height = image.size
-                        image.save(out_img)
+                            width, height = rgb_image.size
+                        rgb_image.save(out_img)
+                        image_array = np.array(rgb_image)
 
                 if width is None or height is None:
                     raise ValueError(f"无法获取图片尺寸: {sample.image_path}")
@@ -349,9 +359,6 @@ class DataPrepPipeline:
 
                 if augmenter is None:
                     continue
-
-                with Image.open(sample.image_path) as pil_img:
-                    image_array = np.array(pil_img.convert("RGB"))
 
                 if executor is not None and thread_state is not None:
                     augmented_items = self._augment_image_parallel(

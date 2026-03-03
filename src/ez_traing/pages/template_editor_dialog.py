@@ -39,6 +39,7 @@ from ez_traing.template_matching.matcher import (
     TemplateInfo,
     imread_unicode,
 )
+from ez_traing.ui.painting import begin_label_painter, draw_box_label
 
 logger = logging.getLogger(__name__)
 
@@ -964,6 +965,7 @@ class TemplateEditorDialog(QDialog):
             self._test_preview.setText("无法读取图片")
             return
 
+        labels_info: List[Tuple[str, int, int, Tuple[int, int, int]]] = []
         for box in boxes:
             color = (0, 255, 0)
             cv2.rectangle(
@@ -974,31 +976,18 @@ class TemplateEditorDialog(QDialog):
                 2,
             )
             label_text = f"{box.label} {box.confidence:.2f}"
-            (tw, th), _ = cv2.getTextSize(
-                label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-            )
-            cv2.rectangle(
-                img,
-                (box.x_min, box.y_min - th - 6),
-                (box.x_min + tw + 4, box.y_min),
-                color,
-                -1,
-            )
-            cv2.putText(
-                img,
-                label_text,
-                (box.x_min + 2, box.y_min - 4),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
+            labels_info.append((label_text, box.x_min, box.y_min, color))
 
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimg)
+
+        if labels_info:
+            painter = begin_label_painter(pixmap)
+            for text, x, y_bottom, bgr in labels_info:
+                draw_box_label(painter, text, x, y_bottom, bgr)
+            painter.end()
 
         lw = self._test_preview.width() or 400
         lh = self._test_preview.height() or 300

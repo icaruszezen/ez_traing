@@ -9,6 +9,11 @@ from ez_traing.data_prep.models import AnnotationBox, DatasetSample
 _VOC_RAW_CACHE: Dict[Tuple[str, int], List[Tuple[str, float, float, float, float]]] = {}
 
 
+def clear_voc_cache() -> None:
+    """清空 VOC XML 解析缓存，在管线结束后调用以释放内存。"""
+    _VOC_RAW_CACHE.clear()
+
+
 def load_existing_classes(dataset_root: Path) -> List[str]:
     """读取已有 classes.txt。"""
     for path in [dataset_root / "classes.txt", dataset_root / "labels" / "classes.txt"]:
@@ -37,6 +42,25 @@ def find_voc_for_image(image_path: Path, dataset_root: Path) -> Optional[Path]:
     if alt.exists():
         return alt
 
+    return None
+
+
+def read_voc_image_size(xml_path: Path) -> Optional[Tuple[int, int]]:
+    """从 VOC XML 的 <size> 元素读取图片尺寸，返回 (width, height) 或 None。"""
+    try:
+        root = ET.parse(xml_path).getroot()
+    except Exception:
+        return None
+    size_elem = root.find("size")
+    if size_elem is None:
+        return None
+    try:
+        w = int((size_elem.findtext("width") or "0").strip())
+        h = int((size_elem.findtext("height") or "0").strip())
+    except (ValueError, TypeError):
+        return None
+    if w > 0 and h > 0:
+        return w, h
     return None
 
 

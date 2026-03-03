@@ -304,7 +304,7 @@ class PrelabelingWorker(QThread):
         Returns:
             保存的标注文件路径
         """
-        image_size = self._voc_writer._get_image_size(image_path)
+        image_size = self._voc_writer.get_image_size(image_path)
         if merge_existing:
             return self._voc_writer.save_merged_annotation(image_path, image_size, boxes)
         return self._voc_writer.save_annotation(image_path, image_size, boxes)

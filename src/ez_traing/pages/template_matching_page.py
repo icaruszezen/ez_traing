@@ -53,6 +53,7 @@ from ez_traing.prelabeling.models import BoundingBox
 from ez_traing.prelabeling.voc_writer import VOCAnnotationWriter
 from ez_traing.template_matching.matcher import PreprocessConfig, TemplateMatcher, TemplateInfo, imread_unicode
 from ez_traing.template_matching.worker import TemplateMatchingStats, TemplateMatchingWorker
+from ez_traing.ui.painting import begin_label_painter, draw_box_label
 from ez_traing.ui.workers import ImageScanWorker as _ImageScanWorker
 
 logger = logging.getLogger(__name__)
@@ -63,41 +64,8 @@ logger = logging.getLogger(__name__)
 # ======================================================================
 
 
-def _draw_box_label(
-    painter: QPainter,
-    text: str,
-    x: int,
-    y_bottom: int,
-    bg_color_bgr: Tuple[int, int, int],
-):
-    """在 QPainter 上绘制带背景色的文字标签（支持中文）。
-
-    ``y_bottom`` 是标签区域的底边 y 坐标（通常等于检测框的 y_min）。
-    ``bg_color_bgr`` 为 BGR 三元组，与 OpenCV 的颜色约定一致。
-    """
-    fm = painter.fontMetrics()
-    tw = fm.horizontalAdvance(text)
-    th = fm.height()
-    pad = 3
-    r, g, b = bg_color_bgr[2], bg_color_bgr[1], bg_color_bgr[0]
-
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor(r, g, b))
-    painter.drawRect(x, y_bottom - th - 2 * pad, tw + 2 * pad, th + 2 * pad)
-
-    painter.setPen(QColor(255, 255, 255))
-    painter.setBrush(Qt.NoBrush)
-    painter.drawText(x + pad, y_bottom - fm.descent() - pad, text)
-
-
-def _begin_label_painter(pixmap: QPixmap, pixel_size: int = 16) -> QPainter:
-    """创建用于在 QPixmap 上绘制标签文字的 QPainter。"""
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    font = QFont("Microsoft YaHei", -1)
-    font.setPixelSize(pixel_size)
-    painter.setFont(font)
-    return painter
+_draw_box_label = draw_box_label
+_begin_label_painter = begin_label_painter
 
 
 # ======================================================================
@@ -991,9 +959,6 @@ class TemplateMatchingPage(QWidget):
 
         added = 0
         for p in paths:
-            if any(t.path == p and t.label == Path(p).stem for t in self._template_infos):
-                continue
-
             dialog = TemplateEditorDialog(p, Path(p).stem, parent=self.window())
             if dialog.exec_() != QDialog.Accepted:
                 continue
@@ -1002,6 +967,15 @@ class TemplateMatchingPage(QWidget):
             label = dialog.get_label()
             if cropped is None:
                 self._log(f"无法读取图片: {p}", "error")
+                continue
+
+            ch, cw = cropped.shape[:2]
+            if any(
+                t.path == p and t.label == label
+                and t.width == cw and t.height == ch
+                for t in self._template_infos
+            ):
+                self._log(f"跳过重复模板: {label} ({cw}x{ch})")
                 continue
 
             config = dialog.get_preprocess_config()
@@ -1038,11 +1012,10 @@ class TemplateMatchingPage(QWidget):
 
     def _on_remove_template(self):
         row = self._tpl_list.currentRow()
-        if row < 0:
+        if row < 0 or row >= len(self._template_infos):
             return
-        item = self._tpl_list.takeItem(row)
-        path = item.data(Qt.UserRole)
-        self._template_infos = [t for t in self._template_infos if t.path != path]
+        self._tpl_list.takeItem(row)
+        self._template_infos.pop(row)
         self._update_tpl_count()
 
     def _on_clear_templates(self):
@@ -1578,7 +1551,7 @@ class TemplateMatchingPage(QWidget):
             xml_path = str(Path(image_path).with_suffix(".xml"))
 
             try:
-                image_size = self._voc_writer._get_image_size(image_path)
+                image_size = self._voc_writer.get_image_size(image_path)
                 has_existing = Path(xml_path).exists()
 
                 if has_existing:

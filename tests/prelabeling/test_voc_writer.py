@@ -117,39 +117,39 @@ class TestSaveAnnotation:
 
 
 class TestGetImageSize:
-    """_get_image_size 方法测试"""
+    """get_image_size 方法测试"""
 
     def test_rgb_image(self, writer, tmp_path):
         img = Image.new("RGB", (800, 600))
         path = str(tmp_path / "rgb.png")
         img.save(path)
-        h, w, d = writer._get_image_size(path)
+        h, w, d = writer.get_image_size(path)
         assert (h, w, d) == (600, 800, 3)
 
     def test_grayscale_image(self, writer, tmp_path):
         img = Image.new("L", (320, 240))
         path = str(tmp_path / "gray.png")
         img.save(path)
-        h, w, d = writer._get_image_size(path)
+        h, w, d = writer.get_image_size(path)
         assert (h, w, d) == (240, 320, 1)
 
     def test_rgba_image(self, writer, tmp_path):
         img = Image.new("RGBA", (1024, 768))
         path = str(tmp_path / "rgba.png")
         img.save(path)
-        h, w, d = writer._get_image_size(path)
+        h, w, d = writer.get_image_size(path)
         assert (h, w, d) == (768, 1024, 4)
 
     def test_jpeg_format(self, writer, tmp_path):
         img = Image.new("RGB", (1920, 1080))
         path = str(tmp_path / "photo.jpg")
         img.save(path)
-        h, w, d = writer._get_image_size(path)
+        h, w, d = writer.get_image_size(path)
         assert (h, w, d) == (1080, 1920, 3)
 
     def test_bmp_format(self, writer, tmp_path):
         img = Image.new("RGB", (400, 300))
         path = str(tmp_path / "image.bmp")
         img.save(path)
-        h, w, d = writer._get_image_size(path)
+        h, w, d = writer.get_image_size(path)
         assert (h, w, d) == (300, 400, 3)
