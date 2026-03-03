@@ -15,10 +15,19 @@ import requests
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from ez_traing import __version__
+from ez_traing.common.constants import get_github_mirror_prefix
 
 GITHUB_REPO = "icaruszezen/ez_traing"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 REQUEST_TIMEOUT = 15
+
+
+def _mirror_url(url: str) -> str:
+    """Prepend the configured mirror prefix to a URL when enabled."""
+    prefix = get_github_mirror_prefix()
+    if prefix:
+        return prefix + url
+    return url
 
 
 def is_frozen() -> bool:
@@ -61,12 +70,24 @@ class CheckUpdateWorker(QThread):
 
     def run(self):
         try:
-            resp = requests.get(
-                RELEASES_API,
-                headers={"Accept": "application/vnd.github.v3+json"},
-                timeout=REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
+            api_url = _mirror_url(RELEASES_API)
+            try:
+                resp = requests.get(
+                    api_url,
+                    headers={"Accept": "application/vnd.github.v3+json"},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+            except requests.RequestException:
+                if api_url != RELEASES_API:
+                    resp = requests.get(
+                        RELEASES_API,
+                        headers={"Accept": "application/vnd.github.v3+json"},
+                        timeout=REQUEST_TIMEOUT,
+                    )
+                    resp.raise_for_status()
+                else:
+                    raise
             data = resp.json()
 
             tag = data.get("tag_name", "")
@@ -113,7 +134,7 @@ class DownloadWorker(QThread):
 
     def __init__(self, url: str, parent=None):
         super().__init__(parent)
-        self.url = url
+        self.url = _mirror_url(url)
 
     def run(self):
         try:

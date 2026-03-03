@@ -1,7 +1,8 @@
+import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff", ".tif"}
 
@@ -12,6 +13,45 @@ def get_config_dir() -> Path:
     config_dir = Path.home() / ".ez_traing"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
+
+
+_SETTINGS_FILE = "settings.json"
+
+_DEFAULT_SETTINGS: Dict[str, Any] = {
+    "github_mirror_enabled": False,
+    "github_mirror_url": "https://ghp.ci/",
+}
+
+
+def load_settings() -> Dict[str, Any]:
+    path = get_config_dir() / _SETTINGS_FILE
+    settings = dict(_DEFAULT_SETTINGS)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                settings.update(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return settings
+
+
+def save_settings(settings: Dict[str, Any]) -> None:
+    path = get_config_dir() / _SETTINGS_FILE
+    merged = dict(_DEFAULT_SETTINGS)
+    merged.update(settings)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+
+def get_github_mirror_prefix() -> str:
+    """Return the mirror URL prefix if enabled, otherwise empty string."""
+    settings = load_settings()
+    if settings.get("github_mirror_enabled"):
+        url = settings.get("github_mirror_url", "")
+        if url and not url.endswith("/"):
+            url += "/"
+        return url
+    return ""
 
 
 def detect_devices() -> List[Tuple[str, str]]:

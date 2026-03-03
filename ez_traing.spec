@@ -21,11 +21,13 @@ datas += collect_data_files("qfluentwidgets", includes=["**/*.qss", "**/*.svg",
                                                          "**/*.png", "**/*.ttf",
                                                          "**/*.json"])
 
-# labelImg resources & data
-datas += [
-    (os.path.join(THIRD_PARTY, "labelImg", "resources"), os.path.join("third_party", "labelImg", "resources")),
-    (os.path.join(THIRD_PARTY, "labelImg", "data"), os.path.join("third_party", "labelImg", "data")),
-]
+# labelImg (full tree, excluding __pycache__ and .pyc)
+labelimg_tree = Tree(
+    os.path.join(THIRD_PARTY, "labelImg"),
+    prefix=os.path.join("third_party", "labelImg"),
+    excludes=["__pycache__", "*.pyc"],
+)
+datas += labelimg_tree
 
 # annotation script templates (shipped as data so users can edit them)
 datas += [

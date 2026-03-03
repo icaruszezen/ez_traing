@@ -24,9 +24,13 @@ from qfluentwidgets import (
     PrimaryPushButton,
     ProgressBar,
     MessageBox,
+    SwitchButton,
+    ComboBox,
+    LineEdit,
 )
 
 from ez_traing import __version__
+from ez_traing.common.constants import load_settings, save_settings
 from ez_traing.updater import (
     is_frozen,
     CheckUpdateWorker,
@@ -337,6 +341,13 @@ class SettingsPage(QWidget):
         self._version_card = self._create_update_card(content_layout)
         content_layout.addSpacing(10)
 
+        # ── GitHub 加速 ──────────────────────────────────────────────
+        mirror_group_label = StrongBodyLabel("GitHub 加速", self)
+        content_layout.addWidget(mirror_group_label)
+
+        self._create_mirror_card(content_layout)
+        content_layout.addSpacing(10)
+
         # 获取版本信息
         pkg_info = _get_package_info()
         ultralytics_installed = pkg_info["ultralytics_version"] is not None
@@ -442,6 +453,148 @@ class SettingsPage(QWidget):
 
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
+
+    # ── GitHub 加速设置 ────────────────────────────────────────────
+
+    _PRESET_MIRRORS = [
+        ("ghp.ci", "https://ghp.ci/"),
+        ("mirror.ghproxy.com", "https://mirror.ghproxy.com/"),
+        ("gh-proxy.com", "https://gh-proxy.com/"),
+        ("自定义", ""),
+    ]
+
+    def _create_mirror_card(self, parent_layout: QVBoxLayout) -> None:
+        settings = load_settings()
+        enabled = settings.get("github_mirror_enabled", False)
+        saved_url = settings.get("github_mirror_url", self._PRESET_MIRRORS[0][1])
+
+        card = CardWidget(self)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 16, 20, 16)
+        card_layout.setSpacing(14)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
+
+        icon_widget = IconWidget(FIF.GLOBE, self)
+        icon_widget.setFixedSize(32, 32)
+        top_row.addWidget(icon_widget)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        title_label = BodyLabel("GitHub 加速站", self)
+        desc_label = CaptionLabel(
+            "国内网络访问 GitHub 较慢时，可启用加速站代理下载和更新检查",
+            self,
+        )
+        text_layout.addWidget(title_label)
+        text_layout.addWidget(desc_label)
+        top_row.addLayout(text_layout)
+        top_row.addStretch()
+
+        self._mirror_switch = SwitchButton(self)
+        self._mirror_switch.setChecked(enabled)
+        top_row.addWidget(self._mirror_switch)
+        card_layout.addLayout(top_row)
+
+        combo_row = QHBoxLayout()
+        combo_row.setSpacing(12)
+        combo_label = BodyLabel("加速站地址", self)
+        combo_row.addWidget(combo_label)
+
+        self._mirror_combo = ComboBox(self)
+        for display_name, _ in self._PRESET_MIRRORS:
+            self._mirror_combo.addItem(display_name)
+        self._mirror_combo.setMinimumWidth(200)
+
+        preset_index = self._find_preset_index(saved_url)
+        self._mirror_combo.setCurrentIndex(preset_index)
+
+        combo_row.addWidget(self._mirror_combo)
+        combo_row.addStretch()
+        card_layout.addLayout(combo_row)
+
+        self._custom_edit = LineEdit(self)
+        self._custom_edit.setPlaceholderText("请输入加速站 URL，如 https://example.com/")
+        is_custom = preset_index == len(self._PRESET_MIRRORS) - 1
+        if is_custom:
+            self._custom_edit.setText(saved_url)
+        self._custom_edit.setVisible(is_custom)
+
+        card_layout.addWidget(self._custom_edit)
+
+        self._mirror_combo.setEnabled(enabled)
+        self._custom_edit.setEnabled(enabled)
+
+        self._mirror_switch.checkedChanged.connect(self._on_mirror_toggled)
+        self._mirror_combo.currentIndexChanged.connect(self._on_mirror_combo_changed)
+        self._custom_edit.editingFinished.connect(self._on_custom_mirror_edited)
+
+        parent_layout.addWidget(card)
+
+    def _find_preset_index(self, url: str) -> int:
+        for i, (_, preset_url) in enumerate(self._PRESET_MIRRORS[:-1]):
+            if url == preset_url:
+                return i
+        return len(self._PRESET_MIRRORS) - 1
+
+    def _on_mirror_toggled(self, checked):
+        self._mirror_combo.setEnabled(checked)
+        is_custom = self._mirror_combo.currentIndex() == len(self._PRESET_MIRRORS) - 1
+        self._custom_edit.setEnabled(checked)
+        self._custom_edit.setVisible(checked and is_custom)
+        self._save_mirror_settings()
+
+    def _on_mirror_combo_changed(self, index: int):
+        is_custom = index == len(self._PRESET_MIRRORS) - 1
+        self._custom_edit.setVisible(is_custom)
+        if is_custom:
+            self._custom_edit.setFocus()
+        else:
+            self._save_mirror_settings()
+
+    def _on_custom_mirror_edited(self):
+        self._save_mirror_settings()
+
+    def _save_mirror_settings(self):
+        enabled = self._mirror_switch.isChecked()
+        index = self._mirror_combo.currentIndex()
+        is_custom = index == len(self._PRESET_MIRRORS) - 1
+        if is_custom:
+            url = self._custom_edit.text().strip()
+        else:
+            url = self._PRESET_MIRRORS[index][1]
+
+        if enabled and is_custom:
+            if not url:
+                self._mirror_switch.setChecked(False)
+                InfoBar.warning(
+                    title="加速站地址为空",
+                    content="请先输入加速站地址",
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                    parent=self.window(),
+                )
+                return
+            if not url.startswith(("http://", "https://")):
+                InfoBar.warning(
+                    title="地址格式不正确",
+                    content="加速站地址需以 http:// 或 https:// 开头",
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                    parent=self.window(),
+                )
+                return
+
+        settings = load_settings()
+        settings["github_mirror_enabled"] = enabled
+        settings["github_mirror_url"] = url
+        save_settings(settings)
 
     # ── 更新功能 ──────────────────────────────────────────────────
 

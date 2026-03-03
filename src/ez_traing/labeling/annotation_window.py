@@ -21,7 +21,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-LABELIMG_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "labelImg"
+if getattr(sys, "frozen", False):
+    _BASE = Path(sys._MEIPASS)
+else:
+    _BASE = Path(__file__).resolve().parents[2]
+
+LABELIMG_ROOT = _BASE / "third_party" / "labelImg"
 RESOURCES_ROOT = LABELIMG_ROOT / "resources"
 ICONS_DIR = RESOURCES_ROOT / "icons"
 STRINGS_DIR = RESOURCES_ROOT / "strings"
