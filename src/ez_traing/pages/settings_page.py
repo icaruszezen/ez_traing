@@ -1,7 +1,14 @@
-"""设置页面 - 显示环境信息和 GPU 状态"""
+"""设置页面 - 显示环境信息、GPU 状态和应用更新"""
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QVBoxLayout, QWidget, QLabel, QHBoxLayout
+from PyQt5.QtWidgets import (
+    QVBoxLayout,
+    QWidget,
+    QLabel,
+    QHBoxLayout,
+    QApplication,
+    QMessageBox,
+)
 from qfluentwidgets import (
     CardWidget,
     FluentIcon as FIF,
@@ -14,9 +21,18 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     PushButton,
+    PrimaryPushButton,
+    ProgressBar,
+    MessageBox,
 )
-from PyQt5.QtGui import QClipboard
-from PyQt5.QtWidgets import QApplication
+
+from ez_traing import __version__
+from ez_traing.updater import (
+    is_frozen,
+    CheckUpdateWorker,
+    DownloadWorker,
+    apply_update_and_restart,
+)
 
 
 def _get_package_info():
@@ -314,6 +330,13 @@ class SettingsPage(QWidget):
         content_layout.addWidget(title_label)
         content_layout.addSpacing(10)
 
+        # ── 应用版本 ──────────────────────────────────────────────
+        app_group_label = StrongBodyLabel("应用版本", self)
+        content_layout.addWidget(app_group_label)
+
+        self._version_card = self._create_update_card(content_layout)
+        content_layout.addSpacing(10)
+
         # 获取版本信息
         pkg_info = _get_package_info()
         ultralytics_installed = pkg_info["ultralytics_version"] is not None
@@ -419,3 +442,152 @@ class SettingsPage(QWidget):
 
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
+
+    # ── 更新功能 ──────────────────────────────────────────────────
+
+    def _create_update_card(self, parent_layout: QVBoxLayout) -> CardWidget:
+        card = CardWidget(self)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(16)
+
+        icon_widget = IconWidget(FIF.UPDATE, self)
+        icon_widget.setFixedSize(32, 32)
+        layout.addWidget(icon_widget)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+
+        title_label = BodyLabel("当前版本", self)
+        mode = "开发模式" if not is_frozen() else ""
+        version_text = f"v{__version__}  {mode}".strip()
+        self._version_label = StrongBodyLabel(version_text, self)
+
+        text_layout.addWidget(title_label)
+        text_layout.addWidget(self._version_label)
+        layout.addLayout(text_layout)
+        layout.addStretch()
+
+        self._update_btn = PrimaryPushButton("检查更新", self)
+        self._update_btn.setFixedWidth(110)
+        self._update_btn.clicked.connect(self._on_check_update)
+        layout.addWidget(self._update_btn)
+
+        parent_layout.addWidget(card)
+
+        self._progress_bar = ProgressBar(self)
+        self._progress_bar.setFixedHeight(4)
+        self._progress_bar.hide()
+        parent_layout.addWidget(self._progress_bar)
+
+        self._check_worker = None
+        self._download_worker = None
+
+        return card
+
+    def _on_check_update(self):
+        self._update_btn.setEnabled(False)
+        self._update_btn.setText("检查中...")
+
+        self._check_worker = CheckUpdateWorker(self)
+        self._check_worker.finished.connect(self._on_check_finished)
+        self._check_worker.error.connect(self._on_check_error)
+        self._check_worker.start()
+
+    def _on_check_finished(self, release_info):
+        self._update_btn.setEnabled(True)
+        self._update_btn.setText("检查更新")
+
+        if release_info is None:
+            InfoBar.success(
+                title="已是最新版本",
+                content=f"当前版本 v{__version__} 已是最新",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self.window(),
+            )
+            return
+
+        body_preview = release_info.body[:300] if release_info.body else ""
+        size_mb = f"{release_info.size / 1024 / 1024:.1f} MB" if release_info.size else ""
+
+        dlg = MessageBox(
+            f"发现新版本 {release_info.tag}",
+            f"{body_preview}\n\n文件大小: {size_mb}" if size_mb else body_preview,
+            self.window(),
+        )
+        dlg.yesButton.setText("立即更新")
+        dlg.cancelButton.setText("稍后")
+
+        if dlg.exec():
+            self._start_download(release_info)
+
+    def _on_check_error(self, msg: str):
+        self._update_btn.setEnabled(True)
+        self._update_btn.setText("检查更新")
+        InfoBar.error(
+            title="检查更新失败",
+            content=msg,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=5000,
+            parent=self.window(),
+        )
+
+    def _start_download(self, release_info):
+        if not is_frozen():
+            InfoBar.warning(
+                title="开发模式",
+                content="源码运行时不支持自动更新，请从 GitHub Release 手动下载",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self.window(),
+            )
+            return
+
+        self._update_btn.setEnabled(False)
+        self._update_btn.setText("下载中...")
+        self._progress_bar.setValue(0)
+        self._progress_bar.show()
+
+        self._download_worker = DownloadWorker(release_info.download_url, self)
+        self._download_worker.progress.connect(self._progress_bar.setValue)
+        self._download_worker.finished.connect(self._on_download_finished)
+        self._download_worker.error.connect(self._on_download_error)
+        self._download_worker.start()
+
+    def _on_download_finished(self, extracted_dir: str):
+        self._progress_bar.hide()
+        self._update_btn.setText("检查更新")
+        self._update_btn.setEnabled(True)
+
+        dlg = MessageBox(
+            "下载完成",
+            "新版本已下载完成，应用将自动关闭并完成更新后重启。",
+            self.window(),
+        )
+        dlg.yesButton.setText("立即重启")
+        dlg.cancelButton.setText("取消")
+
+        if dlg.exec():
+            apply_update_and_restart(extracted_dir)
+
+    def _on_download_error(self, msg: str):
+        self._progress_bar.hide()
+        self._update_btn.setEnabled(True)
+        self._update_btn.setText("检查更新")
+        InfoBar.error(
+            title="下载失败",
+            content=msg,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=5000,
+            parent=self.window(),
+        )
