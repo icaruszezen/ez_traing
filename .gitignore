@@ -31,6 +31,7 @@ MANIFEST
 # before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!ez_traing.spec
 
 # Installer logs
 pip-log.txt
@@ -136,3 +137,6 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 ez_traing.rar
+
+.kiro
+.kiro/*
