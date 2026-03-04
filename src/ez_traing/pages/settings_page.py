@@ -46,6 +46,9 @@ from ez_traing.dep_installer import InstallWorker, TORCH_INDEX_URLS
 
 def _get_package_info():
     """安全获取包版本信息，未安装时返回 None"""
+    import logging
+    _log = logging.getLogger(__name__)
+
     info = {
         "ultralytics_version": None,
         "torch_version": None,
@@ -54,14 +57,12 @@ def _get_package_info():
         "gpu_names": [],
     }
 
-    # 检测 ultralytics
     try:
         import ultralytics
         info["ultralytics_version"] = ultralytics.__version__
-    except ImportError:
-        pass
+    except Exception as exc:
+        _log.debug("ultralytics import failed: %s", exc)
 
-    # 检测 torch
     try:
         import torch
         info["torch_version"] = torch.__version__
@@ -71,8 +72,8 @@ def _get_package_info():
             gpu_count = torch.cuda.device_count()
             for i in range(gpu_count):
                 info["gpu_names"].append(torch.cuda.get_device_name(i))
-    except ImportError:
-        pass
+    except Exception as exc:
+        _log.debug("torch import failed: %s", exc)
 
     return info
 

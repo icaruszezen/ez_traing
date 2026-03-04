@@ -10,16 +10,33 @@ if str(SRC_ROOT) not in sys.path:
 if getattr(sys, "frozen", False):
     _deps_dir = Path(sys.executable).parent / "deps"
     if _deps_dir.is_dir():
-        sys.path.append(str(_deps_dir))
-        _torch_lib = _deps_dir / "torch" / "lib"
-        if _torch_lib.is_dir():
+        _deps_str = str(_deps_dir)
+        sys.path.insert(0, _deps_str)
+
+        try:
+            import site
+            site.addsitedir(_deps_str)
+        except Exception:
+            pass
+
+        import importlib
+        importlib.invalidate_caches()
+
+        def _add_dll_dir(p: Path):
+            if not p.is_dir():
+                return
+            s = str(p)
             try:
-                os.add_dll_directory(str(_torch_lib))
+                os.add_dll_directory(s)
             except (OSError, AttributeError):
                 pass
-            os.environ["PATH"] = (
-                str(_torch_lib) + os.pathsep + os.environ.get("PATH", "")
-            )
+            if s not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = s + os.pathsep + os.environ.get("PATH", "")
+
+        _add_dll_dir(_deps_dir / "torch" / "lib")
+        _add_dll_dir(_deps_dir / "torch" / "bin")
+        for _nv_lib in _deps_dir.glob("nvidia/*/lib"):
+            _add_dll_dir(_nv_lib)
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
