@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QMessageBox,
     QFileDialog,
+    QTextEdit,
 )
 from qfluentwidgets import (
     CardWidget,
@@ -40,6 +41,7 @@ from ez_traing.updater import (
     DownloadWorker,
     apply_update_and_restart,
 )
+from ez_traing.dep_installer import InstallWorker, TORCH_INDEX_URLS
 
 
 def _get_package_info():
@@ -308,6 +310,118 @@ class InstallSuggestionCard(CardWidget):
         )
 
 
+class DepsInstallCard(CardWidget):
+    """一键安装依赖卡片（frozen 模式下使用）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._worker = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        title_layout = QHBoxLayout()
+        icon_widget = IconWidget(FIF.DOWNLOAD, self)
+        icon_widget.setFixedSize(20, 20)
+        title_label = StrongBodyLabel("一键安装依赖", self)
+        title_layout.addWidget(icon_widget)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        layout.addLayout(title_layout)
+
+        desc_label = CaptionLabel(
+            "安装训练和推理所需的 Ultralytics + PyTorch。"
+            "需要系统已安装 Python 3.10+，包体积约 2-3 GB。",
+            self,
+        )
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(12)
+        cuda_label = BodyLabel("PyTorch 版本:", self)
+        action_row.addWidget(cuda_label)
+
+        self._cuda_combo = ComboBox(self)
+        for name in TORCH_INDEX_URLS:
+            self._cuda_combo.addItem(name)
+        self._cuda_combo.setCurrentIndex(1)
+        self._cuda_combo.setMinimumWidth(150)
+        action_row.addWidget(self._cuda_combo)
+
+        action_row.addStretch()
+
+        self._install_btn = PrimaryPushButton("开始安装", self)
+        self._install_btn.setFixedWidth(110)
+        self._install_btn.clicked.connect(self._on_install)
+        action_row.addWidget(self._install_btn)
+
+        layout.addLayout(action_row)
+
+        self._log_edit = QTextEdit(self)
+        self._log_edit.setReadOnly(True)
+        self._log_edit.setFixedHeight(220)
+        self._log_edit.setStyleSheet(
+            "QTextEdit { background-color: #1e1e1e; color: #cccccc; "
+            "font-family: Consolas, 'Courier New', monospace; font-size: 12px; "
+            "border-radius: 6px; padding: 8px; }"
+        )
+        self._log_edit.hide()
+        layout.addWidget(self._log_edit)
+
+    def _on_install(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._install_btn.setEnabled(False)
+            self._install_btn.setText("正在取消...")
+            return
+
+        self._log_edit.clear()
+        self._log_edit.show()
+        self._install_btn.setText("取消安装")
+        self._cuda_combo.setEnabled(False)
+
+        cuda_variant = self._cuda_combo.currentText()
+        self._worker = InstallWorker(cuda_variant, self)
+        self._worker.log.connect(self._on_log)
+        self._worker.install_finished.connect(self._on_finished)
+        self._worker.start()
+
+    def _on_log(self, text: str):
+        self._log_edit.append(text)
+        sb = self._log_edit.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_finished(self, success: bool, message: str):
+        self._install_btn.setEnabled(True)
+        self._install_btn.setText("开始安装")
+        self._cuda_combo.setEnabled(True)
+
+        if success:
+            self._log_edit.append(f"\n{message}")
+            InfoBar.success(
+                title="安装完成",
+                content=message,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self.window(),
+            )
+        else:
+            self._log_edit.append(f"\n{message}")
+            InfoBar.error(
+                title="安装失败",
+                content=message,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self.window(),
+            )
+
+
 class SettingsPage(QWidget):
     """设置页面"""
 
@@ -427,36 +541,35 @@ class SettingsPage(QWidget):
         content_layout.addWidget(gpu_device_card)
 
         # 安装建议部分
-        need_suggestion = not ultralytics_installed or not torch_installed or not cuda_available
-        if need_suggestion:
+        need_install = not ultralytics_installed or not torch_installed
+        need_gpu_fix = torch_installed and not cuda_available
+
+        if need_install or need_gpu_fix:
             content_layout.addSpacing(10)
-            suggestion_group_label = StrongBodyLabel("安装建议", self)
+            suggestion_group_label = StrongBodyLabel("依赖安装", self)
             content_layout.addWidget(suggestion_group_label)
 
-            # Ultralytics 未安装
-            if not ultralytics_installed:
-                ultralytics_install_card = PackageInstallCard(
-                    "安装 Ultralytics",
-                    "Ultralytics 是 YOLO 模型的官方实现库，用于目标检测模型的训练和推理。",
-                    "pip install ultralytics",
-                    self,
-                )
-                content_layout.addWidget(ultralytics_install_card)
-
-            # PyTorch 未安装
-            if not torch_installed:
-                torch_install_card = PackageInstallCard(
-                    "安装 PyTorch (GPU 版本)",
-                    "PyTorch 是深度学习框架，建议安装支持 GPU 的版本以加速训练。"
-                    "请根据您的 CUDA 版本选择合适的安装命令。",
-                    "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
-                    self,
-                )
-                content_layout.addWidget(torch_install_card)
-            # PyTorch 已安装但不支持 GPU
-            elif not cuda_available:
-                suggestion_card = InstallSuggestionCard(self)
-                content_layout.addWidget(suggestion_card)
+            if is_frozen():
+                deps_card = DepsInstallCard(self)
+                content_layout.addWidget(deps_card)
+            else:
+                if not ultralytics_installed:
+                    content_layout.addWidget(PackageInstallCard(
+                        "安装 Ultralytics",
+                        "Ultralytics 是 YOLO 模型的官方实现库，用于目标检测模型的训练和推理。",
+                        "pip install ultralytics -i https://mirrors.aliyun.com/pypi/simple/",
+                        self,
+                    ))
+                if not torch_installed:
+                    content_layout.addWidget(PackageInstallCard(
+                        "安装 PyTorch (GPU 版本)",
+                        "PyTorch 是深度学习框架，建议安装支持 GPU 的版本以加速训练。"
+                        "请根据您的 CUDA 版本选择合适的安装命令。",
+                        "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+                        self,
+                    ))
+                if need_gpu_fix:
+                    content_layout.addWidget(InstallSuggestionCard(self))
 
         # 弹性空间
         content_layout.addStretch()

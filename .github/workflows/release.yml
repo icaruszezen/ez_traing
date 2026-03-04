@@ -50,6 +50,10 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         run: pyinstaller ez_traing.spec
 
+      - name: Copy install script into dist
+        if: steps.check_tag.outputs.exists == 'false'
+        run: copy install_deps.bat dist\ez_traing\
+
       - name: Create zip archive
         if: steps.check_tag.outputs.exists == 'false'
         shell: pwsh

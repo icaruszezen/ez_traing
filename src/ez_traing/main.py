@@ -1,10 +1,25 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+
+if getattr(sys, "frozen", False):
+    _deps_dir = Path(sys.executable).parent / "deps"
+    if _deps_dir.is_dir():
+        sys.path.append(str(_deps_dir))
+        _torch_lib = _deps_dir / "torch" / "lib"
+        if _torch_lib.is_dir():
+            try:
+                os.add_dll_directory(str(_torch_lib))
+            except (OSError, AttributeError):
+                pass
+            os.environ["PATH"] = (
+                str(_torch_lib) + os.pathsep + os.environ.get("PATH", "")
+            )
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
