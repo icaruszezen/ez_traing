@@ -27,18 +27,24 @@ class Settings(object):
         return False
 
     def load(self):
+        if not os.path.exists(self.path):
+            return False
         try:
-            if os.path.exists(self.path):
-                with open(self.path, 'rb') as f:
-                    self.data = pickle.load(f)
-                    return True
-        except Exception:
-            print('Loading setting failed')
+            with open(self.path, 'rb') as f:
+                self.data = pickle.load(f)
+                return True
+        except Exception as e:
+            print(f'Loading setting failed ({self.path}): {e}')
+            try:
+                os.remove(self.path)
+                print(f'Removed corrupted settings file: {self.path}')
+            except OSError:
+                pass
         return False
 
     def reset(self):
         if os.path.exists(self.path):
             os.remove(self.path)
-            print('Remove setting pkl file ${0}'.format(self.path))
+            print('Remove setting pkl file {0}'.format(self.path))
         self.data = {}
         self.path = None
