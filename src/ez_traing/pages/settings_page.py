@@ -778,7 +778,7 @@ class SettingsPage(QWidget):
         text_layout.setContentsMargins(0, 0, 0, 0)
         title_label = BodyLabel("加样数据集存放目录", self)
         desc_label = CaptionLabel(
-            "批量标注时标记为"加样"的图片和标注将复制到此目录下的子文件夹中",
+            '批量标注时标记为"加样"的图片和标注将复制到此目录下的子文件夹中',
             self,
         )
         text_layout.addWidget(title_label)
