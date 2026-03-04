@@ -1,6 +1,5 @@
 """VOC 标注文件写入器，封装 PascalVocWriter 提供简化接口"""
 
-import sys
 import os
 import threading
 import xml.etree.ElementTree as ET
@@ -10,16 +9,10 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 
+from ez_traing.labeling.pascal_voc_io import PascalVocWriter
 from ez_traing.prelabeling.models import BoundingBox
 
 _CACHE_MAX_SIZE = 512
-
-# 确保 labelImg 的 libs 模块可被导入
-_LABELIMG_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "labelImg"
-if str(_LABELIMG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_LABELIMG_ROOT))
-
-from libs.pascal_voc_io import PascalVocWriter
 
 
 class VOCAnnotationWriter:

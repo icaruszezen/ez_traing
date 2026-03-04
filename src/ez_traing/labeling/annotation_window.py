@@ -1,7 +1,5 @@
 import os
-import re
 import sys
-import types
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QRect, QSize, QEvent, QPointF, pyqtSignal
@@ -21,82 +19,18 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ez_traing.labeling import label_app as labelimg_module
+from ez_traing.labeling.shape import Shape
+from ez_traing.labeling.utils import new_icon
+
 if getattr(sys, "frozen", False):
-    _BASE = Path(sys._MEIPASS)
+    _LABELING_ROOT = Path(sys._MEIPASS) / "ez_traing" / "labeling"
 else:
-    _BASE = Path(__file__).resolve().parents[2]
+    _LABELING_ROOT = Path(__file__).resolve().parent
 
-LABELIMG_ROOT = _BASE / "third_party" / "labelImg"
-RESOURCES_ROOT = LABELIMG_ROOT / "resources"
-ICONS_DIR = RESOURCES_ROOT / "icons"
-STRINGS_DIR = RESOURCES_ROOT / "strings"
+DATA_DIR = _LABELING_ROOT / "data"
 
-
-def _ensure_labelimg_path():
-    if str(LABELIMG_ROOT) not in sys.path:
-        sys.path.insert(0, str(LABELIMG_ROOT))
-
-
-def _ensure_resources_stub():
-    if "libs.resources" not in sys.modules:
-        sys.modules["libs.resources"] = types.ModuleType("libs.resources")
-
-
-def _resolve_icon_path(icon_name):
-    alias_map = {
-        "help": "help.png",
-        "app": "app.png",
-        "expert": "expert2.png",
-        "done": "done.png",
-        "file": "file.png",
-        "labels": "labels.png",
-        "new": "objects.png",
-        "close": "close.png",
-        "fit-width": "fit-width.png",
-        "fit-window": "fit-window.png",
-        "undo": "undo.png",
-        "hide": "eye.png",
-        "quit": "quit.png",
-        "copy": "copy.png",
-        "edit": "edit.png",
-        "open": "open.png",
-        "save": "save.png",
-        "format_voc": "format_voc.png",
-        "format_yolo": "format_yolo.png",
-        "format_createml": "format_createml.png",
-        "save-as": "save-as.png",
-        "color": "color.png",
-        "color_line": "color_line.png",
-        "zoom": "zoom.png",
-        "zoom-in": "zoom-in.png",
-        "zoom-out": "zoom-out.png",
-        "light_reset": "light_reset.png",
-        "light_lighten": "light_lighten.png",
-        "light_darken": "light_darken.png",
-        "delete": "cancel.png",
-        "next": "next.png",
-        "prev": "prev.png",
-        "resetall": "resetall.png",
-        "verify": "verify.png",
-    }
-
-    filename = alias_map.get(icon_name)
-    if filename:
-        candidate = ICONS_DIR / filename
-        if candidate.exists():
-            return candidate
-
-    for ext in (".png", ".svg", ".ico"):
-        candidate = ICONS_DIR / f"{icon_name}{ext}"
-        if candidate.exists():
-            return candidate
-
-    return None
-
-
-def _new_icon(icon_name):
-    path = _resolve_icon_path(icon_name)
-    return QIcon(str(path)) if path else QIcon()
+labelimg_module.__appname__ = "FluentLabel"
 
 
 def _apply_fluent_palette(widget):
@@ -298,61 +232,6 @@ def _apply_fluent_style(widget):
     _apply_fluent_stylesheet(widget)
 
 
-def _patch_string_bundle(label_string_bundle):
-    def _create_lookup_fallback_list(self, locale_str):
-        result_paths = []
-        base_path = STRINGS_DIR / "strings"
-        result_paths.append(str(base_path))
-        if locale_str is not None:
-            tags = re.split("[^a-zA-Z]", locale_str)
-            for tag in tags:
-                last_path = result_paths[-1]
-                result_paths.append(last_path + "-" + tag)
-        return result_paths
-
-    def _load_bundle(self, path):
-        filename = f"{path}.properties"
-        if not os.path.exists(filename):
-            return
-        with open(filename, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                key_value = line.split("=")
-                key = key_value[0].strip()
-                value = "=".join(key_value[1:]).strip().strip('"')
-                self.id_to_message[key] = value
-
-    label_string_bundle.StringBundle._StringBundle__create_lookup_fallback_list = _create_lookup_fallback_list
-    label_string_bundle.StringBundle._StringBundle__load_bundle = _load_bundle
-
-
-def _patch_utils(label_utils):
-    label_utils.new_icon = _new_icon
-
-
-def _apply_labelimg_patches():
-    _ensure_labelimg_path()
-    _ensure_resources_stub()
-
-    from libs import stringBundle as label_string_bundle
-    from libs import utils as label_utils
-
-    if "libs" in sys.modules and "libs.resources" in sys.modules:
-        setattr(sys.modules["libs"], "resources", sys.modules["libs.resources"])
-
-    _patch_string_bundle(label_string_bundle)
-    _patch_utils(label_utils)
-
-
-_apply_labelimg_patches()
-
-import labelImg as labelimg_module
-
-labelimg_module.__appname__ = "FluentLabel"
-
-
 FLUENT_PREDEFINED_DIALOG_STYLE = """
 PredefinedLabelsDialog {
     background-color: #FCFCFC;
@@ -525,19 +404,16 @@ class PredefinedLabelsDialog(QDialog):
         self._load_text()
 
     def _setup_ui(self):
-        # 应用Fluent样式
         self.setStyleSheet(FLUENT_PREDEFINED_DIALOG_STYLE)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
 
-        # 标题
         title_label = QLabel("编辑预设标签")
         title_label.setObjectName("titleLabel")
         layout.addWidget(title_label)
 
-        # 文件路径与说明
         path_label = QLabel(f"文件: {self._classes_file}")
         path_label.setObjectName("pathLabel")
         path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -547,18 +423,15 @@ class PredefinedLabelsDialog(QDialog):
         hint_label.setObjectName("hintLabel")
         layout.addWidget(hint_label)
 
-        # 文本编辑区
         self._text_edit = LineNumberTextEdit()
         self._text_edit.setPlaceholderText("例如：\ncat\ndog")
         layout.addWidget(self._text_edit, 1)
 
-        # 分隔线
         separator = QWidget()
         separator.setFixedHeight(1)
         separator.setStyleSheet("background-color: #E5E5E5;")
         layout.addWidget(separator)
 
-        # 底部按钮
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(8)
         bottom_layout.addStretch()
@@ -616,7 +489,7 @@ class PredefinedLabelsDialog(QDialog):
 
 class AnnotationWindow(labelimg_module.MainWindow):
     file_loaded = pyqtSignal()
-    file_saved = pyqtSignal(str)  # emits the image file path after saving
+    file_saved = pyqtSignal(str)
 
     def __init__(
         self,
@@ -626,7 +499,7 @@ class AnnotationWindow(labelimg_module.MainWindow):
         parent=None,
     ):
         if default_prefdef_class_file is None:
-            default_prefdef_class_file = str(LABELIMG_ROOT / "data" / "predefined_classes.txt")
+            default_prefdef_class_file = str(DATA_DIR / "predefined_classes.txt")
 
         self._predefined_classes_file = default_prefdef_class_file
 
@@ -707,19 +580,19 @@ class AnnotationWindow(labelimg_module.MainWindow):
 
     def _setup_edit_labels_menu(self):
         """在编辑菜单中添加预设标签编辑项"""
-        edit_labels_action = QAction(_new_icon("labels"), "编辑预设标签...", self)
+        edit_labels_action = QAction(new_icon("labels"), "编辑预设标签...", self)
         edit_labels_action.triggered.connect(self._open_predefined_labels_dialog)
 
         self._extend_edit_menu_actions([edit_labels_action])
 
     def _setup_copy_annotations_menu(self):
         """在编辑菜单中添加复制/粘贴标注项"""
-        copy_action = QAction(_new_icon("copy"), "复制当前图片标注", self)
+        copy_action = QAction(new_icon("copy"), "复制当前图片标注", self)
         copy_action.setShortcut("Ctrl+Shift+C")
         copy_action.setStatusTip("复制当前图片的全部标注框")
         copy_action.triggered.connect(self._copy_current_annotations)
 
-        paste_action = QAction(_new_icon("paste"), "粘贴标注到当前图片", self)
+        paste_action = QAction(new_icon("paste"), "粘贴标注到当前图片", self)
         paste_action.setShortcut("Ctrl+Shift+V")
         paste_action.setStatusTip("将复制的标注框粘贴到当前图片")
         paste_action.triggered.connect(self._paste_copied_annotations)
@@ -837,7 +710,7 @@ class AnnotationWindow(labelimg_module.MainWindow):
         if not label or len(points) < 2:
             return None, False
 
-        shape = labelimg_module.Shape(label=label)
+        shape = Shape(label=label)
         snapped_any = False
         for x, y in points:
             x, y, snapped = self.canvas.snap_point_to_canvas(x, y)
@@ -866,9 +739,7 @@ class AnnotationWindow(labelimg_module.MainWindow):
 
     def _sync_label_ui(self):
         """同步更新界面上的标签相关组件"""
-        # 更新默认标签下拉框 (DefaultLabelComboBox 内部使用 cb 属性存储 QComboBox)
         if hasattr(self, "default_label_combo_box") and hasattr(self.default_label_combo_box, "cb"):
-            # 阻止信号触发，避免 clear 时 index 越界
             self.default_label_combo_box.cb.blockSignals(True)
             self.default_label_combo_box.cb.clear()
             self.default_label_combo_box.cb.addItems(self.label_hist)
@@ -877,7 +748,6 @@ class AnnotationWindow(labelimg_module.MainWindow):
             if self.label_hist:
                 self.default_label = self.label_hist[0]
 
-        # 更新标签对话框
         if hasattr(self, "label_dialog"):
-            from libs.labelDialog import LabelDialog
+            from ez_traing.labeling.label_dialog import LabelDialog
             self.label_dialog = LabelDialog(parent=self, list_item=self.label_hist)

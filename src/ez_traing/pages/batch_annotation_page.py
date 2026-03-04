@@ -6,7 +6,6 @@
 import logging
 import os
 import shutil
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -45,13 +44,8 @@ from qfluentwidgets import (
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS, load_settings
 from ez_traing.labeling.annotation_window import AnnotationWindow
+from ez_traing.labeling.label_file import LabelFile, LabelFileFormat
 from ez_traing.ui.workers import ImageScanWorker, ThumbnailLoader
-
-_LABELIMG_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "labelImg"
-if str(_LABELIMG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_LABELIMG_ROOT))
-
-from libs.labelFile import LabelFile, LabelFileFormat
 
 
 logger = logging.getLogger(__name__)
