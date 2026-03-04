@@ -7,11 +7,8 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-block_cipher = None
-
 # ── paths ──────────────────────────────────────────────────────────────
 SRC_DIR = os.path.join(SPECPATH, "src")
-THIRD_PARTY = os.path.join(SRC_DIR, "third_party")
 
 # ── data files ─────────────────────────────────────────────────────────
 datas = []
@@ -21,13 +18,13 @@ datas += collect_data_files("qfluentwidgets", includes=["**/*.qss", "**/*.svg",
                                                          "**/*.png", "**/*.ttf",
                                                          "**/*.json"])
 
-# labelImg (full tree, excluding __pycache__ and .pyc)
-labelimg_tree = Tree(
-    os.path.join(THIRD_PARTY, "labelImg"),
-    prefix=os.path.join("third_party", "labelImg"),
-    excludes=["__pycache__", "*.pyc"],
-)
-datas += labelimg_tree
+# labeling resources (icons, strings, predefined classes)
+labeling_res = os.path.join(SRC_DIR, "ez_traing", "labeling", "resources")
+labeling_data = os.path.join(SRC_DIR, "ez_traing", "labeling", "data")
+datas += [
+    (labeling_res, os.path.join("ez_traing", "labeling", "resources")),
+    (labeling_data, os.path.join("ez_traing", "labeling", "data")),
+]
 
 # annotation script templates (shipped as data so users can edit them)
 datas += [
@@ -65,13 +62,10 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,
