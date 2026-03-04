@@ -66,9 +66,10 @@ class InstallWorker(QThread):
     log = pyqtSignal(str)
     install_finished = pyqtSignal(bool, str)
 
-    def __init__(self, cuda_variant: str, parent=None):
+    def __init__(self, cuda_variant: str, python_path: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.cuda_variant = cuda_variant
+        self.python_path = python_path
         self._process: Optional[subprocess.Popen] = None
         self._cancelled = False
 
@@ -83,7 +84,10 @@ class InstallWorker(QThread):
                 pass
 
     def run(self):
-        python = find_system_python()
+        if self.python_path:
+            python = self.python_path
+        else:
+            python = find_system_python()
         if python is None:
             self.install_finished.emit(
                 False,
@@ -92,7 +96,17 @@ class InstallWorker(QThread):
             return
 
         version = get_python_version(python)
-        self.log.emit(f"检测到 Python {version}  ({python})")
+        self.log.emit(f"使用 Python {version}  ({python})")
+
+        if is_frozen() and version:
+            bundled = f"{sys.version_info.major}.{sys.version_info.minor}"
+            if version != bundled:
+                self.install_finished.emit(
+                    False,
+                    f"Python 版本 ({version}) 与应用内置 Python ({bundled}) 不一致，"
+                    f"安装的 C 扩展将无法加载。请提供 Python {bundled}.x 的路径后重试",
+                )
+                return
 
         deps_dir = get_deps_dir()
         deps_dir.mkdir(parents=True, exist_ok=True)

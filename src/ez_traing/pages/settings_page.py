@@ -1,6 +1,7 @@
 """设置页面 - 显示环境信息、GPU 状态和应用更新"""
 
 import os
+import sys
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -41,7 +42,12 @@ from ez_traing.updater import (
     DownloadWorker,
     apply_update_and_restart,
 )
-from ez_traing.dep_installer import InstallWorker, TORCH_INDEX_URLS
+from ez_traing.dep_installer import (
+    InstallWorker,
+    TORCH_INDEX_URLS,
+    find_system_python,
+    get_python_version,
+)
 
 
 def _get_package_info():
@@ -331,13 +337,34 @@ class DepsInstallCard(CardWidget):
         title_layout.addStretch()
         layout.addLayout(title_layout)
 
+        bundled = f"{sys.version_info.major}.{sys.version_info.minor}"
         desc_label = CaptionLabel(
-            "安装训练和推理所需的 Ultralytics + PyTorch。"
-            "需要系统已安装 Python 3.10+，包体积约 2-3 GB。",
+            f"安装训练和推理所需的 Ultralytics + PyTorch。"
+            f"需要系统已安装 Python {bundled}（与应用内置版本一致），包体积约 2-3 GB。",
             self,
         )
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
+
+        python_row = QHBoxLayout()
+        python_row.setSpacing(8)
+        python_label = BodyLabel("Python 路径:", self)
+        python_row.addWidget(python_label)
+
+        self._python_edit = LineEdit(self)
+        self._python_edit.setPlaceholderText("自动检测或手动指定 python.exe 路径")
+        self._python_edit.editingFinished.connect(self._on_python_path_edited)
+        python_row.addWidget(self._python_edit, 1)
+
+        self._browse_btn = PushButton("浏览", self)
+        self._browse_btn.setFixedWidth(60)
+        self._browse_btn.clicked.connect(self._on_browse_python)
+        python_row.addWidget(self._browse_btn)
+
+        layout.addLayout(python_row)
+
+        self._python_status = CaptionLabel("", self)
+        layout.addWidget(self._python_status)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
@@ -371,6 +398,48 @@ class DepsInstallCard(CardWidget):
         self._log_edit.hide()
         layout.addWidget(self._log_edit)
 
+        self._auto_detect_python()
+
+    def _auto_detect_python(self):
+        python = find_system_python()
+        if python:
+            self._python_edit.setText(python)
+            self._validate_python(python)
+        else:
+            self._python_status.setText("未检测到系统 Python，请手动指定路径")
+            self._python_status.setStyleSheet("color: #db4437;")
+
+    def _validate_python(self, python_cmd: str):
+        version = get_python_version(python_cmd)
+        if not version:
+            self._python_status.setText(f"无法获取 Python 版本 ({python_cmd})")
+            self._python_status.setStyleSheet("color: #db4437;")
+            return
+
+        bundled = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if version == bundled:
+            self._python_status.setText(f"Python {version} - 版本匹配")
+            self._python_status.setStyleSheet("color: #0f9d58;")
+        else:
+            self._python_status.setText(
+                f"Python {version} - 版本不匹配 (需要 {bundled})"
+            )
+            self._python_status.setStyleSheet("color: #db4437;")
+
+    def _on_browse_python(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 Python 解释器", "",
+            "Python (python.exe python3.exe);;所有文件 (*)",
+        )
+        if path:
+            self._python_edit.setText(path)
+            self._validate_python(path)
+
+    def _on_python_path_edited(self):
+        text = self._python_edit.text().strip()
+        if text:
+            self._validate_python(text)
+
     def _on_install(self):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
@@ -382,9 +451,14 @@ class DepsInstallCard(CardWidget):
         self._log_edit.show()
         self._install_btn.setText("取消安装")
         self._cuda_combo.setEnabled(False)
+        self._python_edit.setEnabled(False)
+        self._browse_btn.setEnabled(False)
 
         cuda_variant = self._cuda_combo.currentText()
-        self._worker = InstallWorker(cuda_variant, self)
+        python_path = self._python_edit.text().strip() or None
+        self._worker = InstallWorker(
+            cuda_variant, python_path=python_path, parent=self,
+        )
         self._worker.log.connect(self._on_log)
         self._worker.install_finished.connect(self._on_finished)
         self._worker.start()
@@ -398,6 +472,8 @@ class DepsInstallCard(CardWidget):
         self._install_btn.setEnabled(True)
         self._install_btn.setText("开始安装")
         self._cuda_combo.setEnabled(True)
+        self._python_edit.setEnabled(True)
+        self._browse_btn.setEnabled(True)
 
         if success:
             self._log_edit.append(f"\n{message}")

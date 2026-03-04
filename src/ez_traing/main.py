@@ -11,7 +11,8 @@ if getattr(sys, "frozen", False):
     _deps_dir = Path(sys.executable).parent / "deps"
     if _deps_dir.is_dir():
         _deps_str = str(_deps_dir)
-        sys.path.insert(0, _deps_str)
+        if _deps_str not in sys.path:
+            sys.path.append(_deps_str)
 
         try:
             import site
