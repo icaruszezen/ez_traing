@@ -52,22 +52,21 @@ from ez_traing.dep_installer import (
 
 def _get_package_info():
     """安全获取包版本信息，未安装时返回 None"""
-    import logging
-    _log = logging.getLogger(__name__)
-
     info = {
         "ultralytics_version": None,
         "torch_version": None,
         "cuda_available": False,
         "cuda_version": None,
         "gpu_names": [],
+        "ultralytics_error": None,
+        "torch_error": None,
     }
 
     try:
         import ultralytics
         info["ultralytics_version"] = ultralytics.__version__
     except Exception as exc:
-        _log.debug("ultralytics import failed: %s", exc)
+        info["ultralytics_error"] = str(exc)
 
     try:
         import torch
@@ -79,7 +78,7 @@ def _get_package_info():
             for i in range(gpu_count):
                 info["gpu_names"].append(torch.cuda.get_device_name(i))
     except Exception as exc:
-        _log.debug("torch import failed: %s", exc)
+        info["torch_error"] = str(exc)
 
     return info
 
@@ -560,7 +559,13 @@ class SettingsPage(QWidget):
         content_layout.addWidget(env_group_label)
 
         # Ultralytics 版本卡片
-        ultralytics_version_text = pkg_info["ultralytics_version"] if ultralytics_installed else "未安装"
+        if ultralytics_installed:
+            ultralytics_version_text = pkg_info["ultralytics_version"]
+        elif pkg_info.get("ultralytics_error"):
+            err = pkg_info["ultralytics_error"]
+            ultralytics_version_text = f"加载失败: {err[:100]}"
+        else:
+            ultralytics_version_text = "未安装"
         ultralytics_card = InfoCard(
             FIF.APPLICATION, "Ultralytics 版本", ultralytics_version_text, self
         )
@@ -569,7 +574,13 @@ class SettingsPage(QWidget):
         content_layout.addWidget(ultralytics_card)
 
         # PyTorch 版本卡片
-        torch_version_text = pkg_info["torch_version"] if torch_installed else "未安装"
+        if torch_installed:
+            torch_version_text = pkg_info["torch_version"]
+        elif pkg_info.get("torch_error"):
+            err = pkg_info["torch_error"]
+            torch_version_text = f"加载失败: {err[:100]}"
+        else:
+            torch_version_text = "未安装"
         torch_card = InfoCard(FIF.DEVELOPER_TOOLS, "PyTorch 版本", torch_version_text, self)
         if not torch_installed:
             torch_card.content_label.setStyleSheet("color: #db4437;")

@@ -11,16 +11,46 @@ if getattr(sys, "frozen", False):
     _deps_dir = Path(sys.executable).parent / "deps"
     if _deps_dir.is_dir():
         _deps_str = str(_deps_dir)
-        if _deps_str not in sys.path:
-            sys.path.append(_deps_str)
-
-        try:
-            import site
-            site.addsitedir(_deps_str)
-        except Exception:
-            pass
 
         import importlib
+        import importlib.util
+
+        class _DepsFinder:
+            """Resolve packages excluded from the PyInstaller bundle from deps/.
+
+            PyInstaller's FrozenImporter may not fall through to PathFinder for
+            packages listed in ``excludes``.  This finder is inserted at the head
+            of ``sys.meta_path`` so it intercepts those packages first and loads
+            them directly from the deps/ directory.  Sub-module resolution is
+            delegated back to the standard machinery via ``__path__``.
+            """
+
+            _PACKAGES = frozenset({
+                "torch", "torchvision", "torchaudio", "ultralytics",
+            })
+
+            def find_spec(self, fullname, path, target=None):
+                top = fullname.split(".", 1)[0]
+                if top not in self._PACKAGES:
+                    return None
+                if "." in fullname:
+                    return None
+                pkg_dir = os.path.join(_deps_str, fullname)
+                init_py = os.path.join(pkg_dir, "__init__.py")
+                if os.path.isdir(pkg_dir) and os.path.isfile(init_py):
+                    return importlib.util.spec_from_file_location(
+                        fullname, init_py,
+                        submodule_search_locations=[pkg_dir],
+                    )
+                single_py = os.path.join(_deps_str, fullname + ".py")
+                if os.path.isfile(single_py):
+                    return importlib.util.spec_from_file_location(fullname, single_py)
+                return None
+
+        sys.meta_path.insert(0, _DepsFinder())
+
+        if _deps_str not in sys.path:
+            sys.path.append(_deps_str)
         importlib.invalidate_caches()
 
         def _add_dll_dir(p: Path):
