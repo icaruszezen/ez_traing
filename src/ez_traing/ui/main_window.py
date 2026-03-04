@@ -78,7 +78,7 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.batch_annotation_page, FIF.COPY, "批量标注")
         self.addSubInterface(self.template_matching_page, FIF.SEARCH, "模板匹配")
         self.addSubInterface(self.data_prep_page, FIF.DOCUMENT, "数据准备")
-        self.addSubInterface(self.script_annotation_page, FIF.DOCUMENT, "脚本标注")
+        self.addSubInterface(self.script_annotation_page, FIF.CODE, "脚本标注")
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
         self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
         self.addSubInterface(
