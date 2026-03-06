@@ -13,6 +13,7 @@ from ez_traing.pages.prelabeling_page import PrelabelingPage
 from ez_traing.pages.script_annotation_page import ScriptAnnotationPage
 from ez_traing.pages.settings_page import SettingsPage
 from ez_traing.pages.template_matching_page import TemplateMatchingPage
+from ez_traing.pages.tools_page import ToolsPage
 from ez_traing.pages.train_page import TrainPage
 
 
@@ -52,6 +53,7 @@ class AppWindow(FluentWindow):
         self._script_annotation_page = None
         self._train_page = None
         self._eval_page = None
+        self._tools_page = None
         self._settings_page = None
         self.annotation_page = LazyPageHost(self._create_annotation_page, self)
         self.batch_annotation_page = LazyPageHost(self._create_batch_annotation_page, self)
@@ -59,6 +61,7 @@ class AppWindow(FluentWindow):
         self.script_annotation_page = LazyPageHost(self._create_script_annotation_page, self)
         self.train_page = LazyPageHost(self._create_train_page, self)
         self.eval_page = LazyPageHost(self._create_eval_page, self)
+        self.tools_page = LazyPageHost(self._create_tools_page, self)
         self.settings_page = LazyPageHost(self._create_settings_page, self)
 
         self.annotation_page.setObjectName("annotation")
@@ -70,6 +73,7 @@ class AppWindow(FluentWindow):
         self.train_page.setObjectName("train")
         self.prelabeling_page.setObjectName("prelabeling")
         self.eval_page.setObjectName("eval")
+        self.tools_page.setObjectName("tools")
         self.settings_page.setObjectName("settings")
 
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
@@ -81,6 +85,7 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.script_annotation_page, FIF.CODE, "脚本标注")
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
         self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
+        self.addSubInterface(self.tools_page, FIF.DEVELOPER_TOOLS, "小工具")
         self.addSubInterface(
             self.settings_page,
             FIF.SETTING,
@@ -135,6 +140,11 @@ class AppWindow(FluentWindow):
             self._eval_page = EvalPage(self)
             self._eval_page.set_project_manager(self.dataset_page.project_manager)
         return self._eval_page
+
+    def _create_tools_page(self):
+        if self._tools_page is None:
+            self._tools_page = ToolsPage(self)
+        return self._tools_page
 
     def _create_settings_page(self):
         if self._settings_page is None:
