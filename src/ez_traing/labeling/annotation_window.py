@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
 
 from ez_traing.labeling import label_app as labelimg_module
 from ez_traing.labeling.shape import Shape
-from ez_traing.labeling.utils import new_icon
+from ez_traing.labeling.utils import generate_color_by_text, new_icon
 
 if getattr(sys, "frozen", False):
     _LABELING_ROOT = Path(sys._MEIPASS) / "ez_traing" / "labeling"
@@ -516,6 +516,7 @@ class AnnotationWindow(labelimg_module.MainWindow):
         self._compact_right_dock_lists()
         self._setup_edit_labels_menu()
         self._setup_copy_annotations_menu()
+        self._setup_quick_label_shortcut()
 
     def load_file(self, file_path=None):
         result = super().load_file(file_path)
@@ -601,6 +602,53 @@ class AnnotationWindow(labelimg_module.MainWindow):
         self._paste_annotations_action = paste_action
         self._extend_edit_menu_actions([copy_action, paste_action])
         self._extend_tools_actions([copy_action, paste_action])
+
+    def _setup_quick_label_shortcut(self):
+        quick_label_action = QAction(new_icon("edit"), "快速变更标签 (T)", self)
+        quick_label_action.setShortcut("T")
+        quick_label_action.setStatusTip("将选中框的标签变更为默认标签下拉框中的标签")
+        quick_label_action.triggered.connect(self._apply_quick_label)
+
+        self._quick_label_action = quick_label_action
+        self._extend_edit_menu_actions([quick_label_action])
+
+    def _apply_quick_label(self):
+        if not self.canvas.editing():
+            return
+
+        shape = self.canvas.selected_shape
+        if shape is None:
+            self.status("请先选择一个标注框")
+            return
+
+        if not self.label_hist:
+            self.status("没有可用的预设标签")
+            return
+
+        idx = self.default_label_combo_box.cb.currentIndex()
+        if idx < 0 or idx >= len(self.label_hist):
+            self.status("请在默认标签下拉框中选择一个标签")
+            return
+
+        new_label = self.label_hist[idx]
+        if shape.label == new_label:
+            return
+
+        old_label = shape.label
+        shape.label = new_label
+        color = generate_color_by_text(new_label)
+        shape.line_color = color
+        shape.fill_color = color
+
+        item = self.shapes_to_items.get(shape)
+        if item is not None:
+            item.setText(new_label)
+            item.setBackground(color)
+
+        self.set_dirty()
+        self.update_combo_box()
+        self.canvas.update()
+        self.status(f"标签已变更: {old_label} → {new_label}")
 
     def _extend_edit_menu_actions(self, actions):
         """将自定义 action 插入编辑菜单，确保模式切换后仍保留"""
