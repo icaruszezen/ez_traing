@@ -664,8 +664,7 @@ class ProjectListWidget(CardWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(260)
-        self.setMaximumWidth(320)
+        self.setMinimumHeight(150)
         self._setup_ui()
     
     def _setup_ui(self):
@@ -1658,46 +1657,46 @@ class DatasetPage(QWidget):
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
         
-        # 主内容区域
+        # 主内容区域：水平分割（左右）
         content_splitter = QSplitter(Qt.Horizontal)
         
-        # 左侧：项目列表
+        # 左侧：垂直分割（数据集项目 + 统计面板，上下排列）
+        left_splitter = QSplitter(Qt.Vertical)
+        
         self.project_list_widget = ProjectListWidget()
         self.project_list_widget.project_selected.connect(self._on_project_selected)
         self.project_list_widget.add_btn.clicked.connect(self._on_add_project)
         self.project_list_widget.delete_btn.clicked.connect(self._on_delete_project)
-        content_splitter.addWidget(self.project_list_widget)
+        left_splitter.addWidget(self.project_list_widget)
         
-        # 中间：图片列表
+        self.statistics_panel = StatisticsPanel()
+        left_splitter.addWidget(self.statistics_panel)
+        
+        left_splitter.setSizes([480, 160])
+        left_splitter.setStretchFactor(0, 3)
+        left_splitter.setStretchFactor(1, 1)
+        
+        content_splitter.addWidget(left_splitter)
+        
+        # 右侧：图片列表和预览（垂直分割）
+        right_splitter = QSplitter(Qt.Vertical)
         self.image_list_panel = ImageListPanel()
         self.image_list_panel.image_selected.connect(self._on_image_selected)
         self.image_list_panel.image_double_clicked.connect(self._on_image_double_clicked)
         self.image_list_panel.filters_changed.connect(self._on_filters_changed)
         self.image_list_panel.page_changed.connect(self._load_page_thumbnails)
-        content_splitter.addWidget(self.image_list_panel)
-        
-        # 右侧：统计和预览（垂直分割）
-        right_splitter = QSplitter(Qt.Vertical)
-        
-        # 统计面板
-        self.statistics_panel = StatisticsPanel()
-        right_splitter.addWidget(self.statistics_panel)
-        
-        # 预览区域
+        right_splitter.addWidget(self.image_list_panel)
         self.preview_widget = ImagePreviewWidget()
         right_splitter.addWidget(self.preview_widget)
-        
-        right_splitter.setSizes([350, 350])
+        right_splitter.setSizes([180, 420])
         right_splitter.setStretchFactor(0, 1)
         right_splitter.setStretchFactor(1, 1)
         
         content_splitter.addWidget(right_splitter)
         
-        # 设置分割比例
-        content_splitter.setSizes([260, 500, 340])
-        content_splitter.setStretchFactor(0, 0)
-        content_splitter.setStretchFactor(1, 2)
-        content_splitter.setStretchFactor(2, 1)
+        content_splitter.setSizes([200, 800])
+        content_splitter.setStretchFactor(0, 1)
+        content_splitter.setStretchFactor(1, 4)
         
         main_layout.addWidget(content_splitter, 1)
         
