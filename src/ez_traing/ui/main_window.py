@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import FluentWindow, NavigationItemPosition
 
+from ez_traing.pages.annotation_guide_page import AnnotationGuidePage
 from ez_traing.pages.annotation_page import AnnotationPage
 from ez_traing.pages.batch_annotation_page import BatchAnnotationPage
 from ez_traing.pages.data_prep_page import DataPrepPage
@@ -54,6 +55,7 @@ class AppWindow(FluentWindow):
         self._train_page = None
         self._eval_page = None
         self._tools_page = None
+        self._annotation_guide_page = None
         self._settings_page = None
         self.annotation_page = LazyPageHost(self._create_annotation_page, self)
         self.batch_annotation_page = LazyPageHost(self._create_batch_annotation_page, self)
@@ -62,6 +64,7 @@ class AppWindow(FluentWindow):
         self.train_page = LazyPageHost(self._create_train_page, self)
         self.eval_page = LazyPageHost(self._create_eval_page, self)
         self.tools_page = LazyPageHost(self._create_tools_page, self)
+        self.annotation_guide_page = LazyPageHost(self._create_annotation_guide_page, self)
         self.settings_page = LazyPageHost(self._create_settings_page, self)
 
         self.annotation_page.setObjectName("annotation")
@@ -74,6 +77,7 @@ class AppWindow(FluentWindow):
         self.prelabeling_page.setObjectName("prelabeling")
         self.eval_page.setObjectName("eval")
         self.tools_page.setObjectName("tools")
+        self.annotation_guide_page.setObjectName("annotation_guide")
         self.settings_page.setObjectName("settings")
 
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
@@ -86,6 +90,7 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
         self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
         self.addSubInterface(self.tools_page, FIF.DEVELOPER_TOOLS, "小工具")
+        self.addSubInterface(self.annotation_guide_page, FIF.EDIT, "标注指导")
         self.addSubInterface(
             self.settings_page,
             FIF.SETTING,
@@ -145,6 +150,14 @@ class AppWindow(FluentWindow):
         if self._tools_page is None:
             self._tools_page = ToolsPage(self)
         return self._tools_page
+
+    def _create_annotation_guide_page(self):
+        if self._annotation_guide_page is None:
+            self._annotation_guide_page = AnnotationGuidePage(self)
+            self._annotation_guide_page.set_project_manager(
+                self.dataset_page.project_manager
+            )
+        return self._annotation_guide_page
 
     def _create_settings_page(self):
         if self._settings_page is None:
