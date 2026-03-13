@@ -6,16 +6,17 @@
 import json
 import logging
 import os
+import tempfile
 import uuid
 import xml.etree.ElementTree as ET
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from collections import Counter
 
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QPainter, QBrush, QPen, QPalette
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QImageReader, QColor, QPainter, QBrush, QPen, QPalette
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -162,7 +163,7 @@ class ProjectManager:
                 logger.exception("Failed to load project config from %s", config_file)
 
     def _save(self):
-        """保存项目配置（排除虚拟条目）"""
+        """保存项目配置（排除虚拟条目），使用原子写入防止中途崩溃导致 JSON 损坏"""
         config_file = _get_projects_file()
         real_projects = [p for p in self.projects.values()
                          if not p.is_virtual and not p.id.startswith(_ARCHIVE_PREFIX)]
@@ -180,8 +181,19 @@ class ProjectManager:
             "subfolder_modes": self._subfolder_modes,
             "archives": archive_list,
         }
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(config_file.parent), suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, str(config_file))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # CRUD
@@ -343,22 +355,32 @@ class ProjectManager:
         subfolders: List[str] = []
         counts: Dict[str, int] = {}
 
-        root_count = sum(
-            1 for f in base.iterdir()
-            if f.is_file() and f.suffix.lower() in SUPPORTED_IMAGE_FORMATS
-        )
+        try:
+            root_count = sum(
+                1 for f in base.iterdir()
+                if f.is_file() and f.suffix.lower() in SUPPORTED_IMAGE_FORMATS
+            )
+        except OSError:
+            root_count = 0
         if root_count > 0:
             subfolders.append("(root)")
             counts["(root)"] = root_count
 
-        for entry in sorted(base.iterdir()):
-            if not entry.is_dir():
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.is_dir() or entry.is_symlink():
                 continue
-            n = sum(
-                1 for _, _, files in os.walk(str(entry))
-                for fn in files
-                if Path(fn).suffix.lower() in SUPPORTED_IMAGE_FORMATS
-            )
+            try:
+                n = sum(
+                    1 for _, _, files in os.walk(str(entry))
+                    for fn in files
+                    if Path(fn).suffix.lower() in SUPPORTED_IMAGE_FORMATS
+                )
+            except OSError:
+                n = 0
             if n > 0:
                 subfolders.append(entry.name)
                 counts[entry.name] = n
@@ -598,35 +620,44 @@ class ImageScanner(QThread):
         self._load_classes()
         
         for directory in self._directories:
+            if self._is_cancelled:
+                return
             if not os.path.isdir(directory):
                 continue
-            if self.recursive:
-                for root, _, files in os.walk(directory):
-                    for file in files:
-                        if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                            all_files.append(os.path.join(root, file))
-            else:
-                for file in os.listdir(directory):
-                    full = os.path.join(directory, file)
-                    if os.path.isfile(full) and Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                        all_files.append(full)
+            try:
+                if self.recursive:
+                    for root, _, files in os.walk(directory):
+                        if self._is_cancelled:
+                            return
+                        for file in files:
+                            if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                                all_files.append(os.path.join(root, file))
+                else:
+                    for file in os.listdir(directory):
+                        full = os.path.join(directory, file)
+                        if os.path.isfile(full) and Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                            all_files.append(full)
+            except OSError as e:
+                logger.warning("Error scanning directory %s: %s", directory, e)
         
         total = len(all_files)
         stats.total_images = total
         
         for i, file_path in enumerate(all_files):
             if self._is_cancelled:
-                break
+                return
             
             path = Path(file_path)
             labels = []
             
-            # 检查 YOLO 格式标注 (.txt)
             txt_path = path.with_suffix(".txt")
             if txt_path.exists():
                 labels = self._parse_yolo_annotation(txt_path)
+                if not labels:
+                    xml_path = path.with_suffix(".xml")
+                    if xml_path.exists():
+                        labels = self._parse_voc_annotation(xml_path)
             else:
-                # 检查 VOC 格式标注 (.xml)
                 xml_path = path.with_suffix(".xml")
                 if xml_path.exists():
                     labels = self._parse_voc_annotation(xml_path)
@@ -1096,40 +1127,60 @@ class ImagePreviewWidget(QFrame):
             self._clear_info()
             return
         
-        # 加载图片
-        pixmap = QPixmap(image_path)
-        if pixmap.isNull():
+        reader = QImageReader(image_path)
+        reader.setAutoTransform(True)
+        orig_size = reader.size()
+        if not orig_size.isValid():
             self.preview_label.setText("无法加载图片")
             self._clear_info()
             return
         
-        img_w, img_h = pixmap.width(), pixmap.height()
+        img_w, img_h = orig_size.width(), orig_size.height()
 
-        if self.annotation_switch.isChecked():
+        show_annotations = self.annotation_switch.isChecked()
+        annotations = []
+        if show_annotations:
             annotations = self._read_annotations(image_path, img_w, img_h)
-            if annotations:
-                pixmap = pixmap.copy()
-                self._draw_annotations(pixmap, annotations)
 
-        # 缩放显示
-        preview_size = self.preview_label.size()
-        scaled = pixmap.scaled(
-            preview_size.width() - 20,
-            preview_size.height() - 20,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
+        if annotations:
+            pixmap = QPixmap(image_path)
+            if pixmap.isNull():
+                self.preview_label.setText("无法加载图片")
+                self._clear_info()
+                return
+            pixmap = pixmap.copy()
+            self._draw_annotations(pixmap, annotations)
+            preview_size = self.preview_label.size()
+            scaled = pixmap.scaled(
+                preview_size.width() - 20,
+                preview_size.height() - 20,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        else:
+            preview_size = self.preview_label.size()
+            target = QSize(preview_size.width() - 20, preview_size.height() - 20)
+            load_size = orig_size.scaled(target, Qt.KeepAspectRatio)
+            reader.setScaledSize(load_size)
+            image = reader.read()
+            if image.isNull():
+                self.preview_label.setText("无法加载图片")
+                self._clear_info()
+                return
+            scaled = QPixmap.fromImage(image)
+
         self.preview_label.setPixmap(scaled)
         
-        # 更新信息
         file_path = Path(image_path)
-        file_stat = file_path.stat()
+        try:
+            file_stat = file_path.stat()
+            self.file_size_label.setText(f"大小: {self._format_size(file_stat.st_size)}")
+        except OSError:
+            self.file_size_label.setText("大小: -")
         
         self.file_name_label.setText(f"文件名: {file_path.name}")
-        self.file_size_label.setText(f"大小: {self._format_size(file_stat.st_size)}")
         self.image_size_label.setText(f"尺寸: {img_w} × {img_h}")
         
-        # 检查标注状态
         annotation_status = self._check_annotation_status(image_path)
         self.annotation_status_label.setText(f"标注: {annotation_status}")
     
@@ -1149,20 +1200,24 @@ class ImagePreviewWidget(QFrame):
     
     def _check_annotation_status(self, image_path: str) -> str:
         """检查图片的标注状态"""
-        path = Path(image_path)
-        
-        # 检查 YOLO 格式标注 (.txt)
-        txt_path = path.with_suffix(".txt")
-        if txt_path.exists():
-            with open(txt_path, "r", encoding="utf-8") as f:
-                lines = [l for l in f.readlines() if l.strip()]
-                if lines:
-                    return f"已标注 (YOLO, {len(lines)} 个对象)"
-        
-        # 检查 VOC 格式标注 (.xml)
-        xml_path = path.with_suffix(".xml")
-        if xml_path.exists():
-            return "已标注 (VOC)"
+        try:
+            path = Path(image_path)
+            
+            txt_path = path.with_suffix(".txt")
+            if txt_path.exists():
+                try:
+                    with open(txt_path, "r", encoding="utf-8") as f:
+                        lines = [l for l in f.readlines() if l.strip()]
+                        if lines:
+                            return f"已标注 (YOLO, {len(lines)} 个对象)"
+                except (OSError, UnicodeDecodeError):
+                    pass
+            
+            xml_path = path.with_suffix(".xml")
+            if xml_path.exists():
+                return "已标注 (VOC)"
+        except Exception:
+            pass
         
         return "未标注"
     
@@ -1299,10 +1354,11 @@ class ImageListPanel(CardWidget):
     page_changed = pyqtSignal(list)  # 当前页的路径列表
     
     PAGE_SIZE = 200
+    THUMBNAIL_CACHE_MAX = 2000
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._thumbnail_cache = {}
+        self._thumbnail_cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._path_to_item = {}
         self._placeholder_pixmap = None
         self._all_paths: List[str] = []
@@ -1463,8 +1519,12 @@ class ImageListPanel(CardWidget):
             self._show_page(self._current_page + 1)
     
     def update_thumbnail(self, path: str, pixmap: QPixmap):
-        """更新缩略图 - 使用字典快速查找"""
+        """更新缩略图 - 使用 LRU OrderedDict，超限时淘汰最旧条目"""
+        if path in self._thumbnail_cache:
+            self._thumbnail_cache.move_to_end(path)
         self._thumbnail_cache[path] = pixmap
+        while len(self._thumbnail_cache) > self.THUMBNAIL_CACHE_MAX:
+            self._thumbnail_cache.popitem(last=False)
         
         item = self._path_to_item.get(path)
         if item:
@@ -1637,6 +1697,8 @@ class DatasetPage(QWidget):
         self.filtered_image_paths: List[str] = []
         self._scanner: Optional[ImageScanner] = None
         self._thumbnail_loader: Optional[ThumbnailLoader] = None
+        self._scan_generation = 0
+        self._thumb_generation = 0
         self._page_thumb_total = 0
         self._page_thumb_loaded = 0
         
@@ -1997,15 +2059,17 @@ class DatasetPage(QWidget):
                 self.project_list_widget.select_project(real_id)
                 self._load_project(real_proj)
 
-    def _load_project(self, project: DatasetProject):
-        """加载项目"""
+    def _cancel_stale_workers(self):
+        """取消旧的后台线程（不阻塞），后续通过 generation 丢弃过时结果"""
         if self._scanner and self._scanner.isRunning():
             self._scanner.cancel()
-            self._scanner.wait()
-
         if self._thumbnail_loader and self._thumbnail_loader.isRunning():
             self._thumbnail_loader.cancel()
-            self._thumbnail_loader.wait()
+
+    def _load_project(self, project: DatasetProject):
+        """加载项目"""
+        self._cancel_stale_workers()
+        self._scan_generation += 1
 
         self.current_project = project
         self.image_infos.clear()
@@ -2027,9 +2091,12 @@ class DatasetPage(QWidget):
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
             self.status_label.setText(f"正在扫描归档: {project.name}...")
+            gen = self._scan_generation
             self._scanner = ImageScanner(directories=dirs)
             self._scanner.progress.connect(self._on_scan_progress)
-            self._scanner.finished.connect(self._on_scan_finished)
+            self._scanner.finished.connect(
+                lambda infos, stats, _g=gen: self._on_scan_finished(infos, stats, _g)
+            )
             self._scanner.start()
             return
 
@@ -2065,9 +2132,12 @@ class DatasetPage(QWidget):
         self.status_label.setText(f"正在扫描: {project.name}...")
 
         recursive = not (project.is_virtual and project.subfolder == "(root)")
+        gen = self._scan_generation
         self._scanner = ImageScanner(project.directory, recursive=recursive)
         self._scanner.progress.connect(self._on_scan_progress)
-        self._scanner.finished.connect(self._on_scan_finished)
+        self._scanner.finished.connect(
+            lambda infos, stats, _g=gen: self._on_scan_finished(infos, stats, _g)
+        )
         self._scanner.start()
     
     def _on_scan_progress(self, current: int, total: int):
@@ -2076,8 +2146,11 @@ class DatasetPage(QWidget):
             self.progress_bar.setValue(int(current / total * 100))
         self.status_label.setText(f"正在扫描: {current}/{total}")
     
-    def _on_scan_finished(self, image_infos: List[ImageInfo], stats: AnnotationStats):
+    def _on_scan_finished(self, image_infos: List[ImageInfo], stats: AnnotationStats,
+                          generation: int = -1):
         """扫描完成"""
+        if generation != self._scan_generation:
+            return
         self.image_infos = sorted(image_infos, key=lambda i: i.path)
         self.image_paths = [info.path for info in self.image_infos]
         count = len(self.image_paths)
@@ -2113,16 +2186,9 @@ class DatasetPage(QWidget):
     
     def _load_page_thumbnails(self, page_paths: List[str]):
         """加载当前页的缩略图"""
-        if self._thumbnail_loader:
-            if self._thumbnail_loader.isRunning():
-                self._thumbnail_loader.cancel()
-                self._thumbnail_loader.wait()
-            try:
-                self._thumbnail_loader.thumbnail_loaded.disconnect(self._on_thumbnail_loaded)
-                self._thumbnail_loader.all_loaded.disconnect(self._on_page_thumbnails_loaded)
-            except TypeError:
-                pass
-            self._thumbnail_loader = None
+        if self._thumbnail_loader and self._thumbnail_loader.isRunning():
+            self._thumbnail_loader.cancel()
+        self._thumb_generation += 1
         
         uncached = [p for p in page_paths if p not in self.image_list_panel._thumbnail_cache]
         if not uncached:
@@ -2134,13 +2200,20 @@ class DatasetPage(QWidget):
         self._page_thumb_loaded = 0
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        gen = self._thumb_generation
         self._thumbnail_loader = ThumbnailLoader(uncached)
-        self._thumbnail_loader.thumbnail_loaded.connect(self._on_thumbnail_loaded)
-        self._thumbnail_loader.all_loaded.connect(self._on_page_thumbnails_loaded)
+        self._thumbnail_loader.thumbnail_loaded.connect(
+            lambda path, img, _g=gen: self._on_thumbnail_loaded(path, img, _g)
+        )
+        self._thumbnail_loader.all_loaded.connect(
+            lambda _g=gen: self._on_page_thumbnails_loaded(_g)
+        )
         self._thumbnail_loader.start()
     
-    def _on_thumbnail_loaded(self, path: str, image: QImage):
+    def _on_thumbnail_loaded(self, path: str, image: QImage, generation: int = -1):
         """缩略图加载 - 在主线程中将 QImage 转换为 QPixmap"""
+        if generation != self._thumb_generation:
+            return
         pixmap = QPixmap.fromImage(image)
         self.image_list_panel.update_thumbnail(path, pixmap)
         
@@ -2148,8 +2221,10 @@ class DatasetPage(QWidget):
         if self._page_thumb_total > 0:
             self.progress_bar.setValue(int(self._page_thumb_loaded / self._page_thumb_total * 100))
     
-    def _on_page_thumbnails_loaded(self):
+    def _on_page_thumbnails_loaded(self, generation: int = -1):
         """当前页缩略图加载完成"""
+        if generation != self._thumb_generation:
+            return
         self.progress_bar.setVisible(False)
         self._update_status_after_load()
     

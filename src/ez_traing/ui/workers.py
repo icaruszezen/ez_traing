@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from typing import List
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QImage
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
+from PyQt5.QtGui import QImage, QImageReader
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 
@@ -27,18 +27,22 @@ class ThumbnailLoader(QThread):
             if self._is_cancelled:
                 break
             try:
-                image = QImage(path)
-                if not image.isNull():
-                    scaled = image.scaled(
-                        self.thumbnail_size,
-                        self.thumbnail_size,
+                reader = QImageReader(path)
+                reader.setAutoTransform(True)
+                orig_size = reader.size()
+                if orig_size.isValid():
+                    scaled_size = orig_size.scaled(
+                        QSize(self.thumbnail_size, self.thumbnail_size),
                         Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation,
                     )
-                    self.thumbnail_loaded.emit(path, scaled)
+                    reader.setScaledSize(scaled_size)
+                image = reader.read()
+                if not image.isNull():
+                    self.thumbnail_loaded.emit(path, image)
             except Exception:
                 pass
-        self.all_loaded.emit()
+        if not self._is_cancelled:
+            self.all_loaded.emit()
 
     def cancel(self):
         self._is_cancelled = True
