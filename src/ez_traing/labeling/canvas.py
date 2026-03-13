@@ -41,6 +41,8 @@ class Canvas(QWidget):
         self.overlay_color = None
         self.label_font_size = 8
         self.pixmap = QPixmap()
+        self._cached_overlay_pixmap = None
+        self._cached_overlay_color = None
         self.visible = {}
         self._hide_background = False
         self.hide_background = False
@@ -52,6 +54,7 @@ class Canvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.WheelFocus)
         self.verified = False
+        self._last_verified_bg = None
         self.draw_square = False
         self.pan_initial_pos = QPoint()
 
@@ -158,6 +161,7 @@ class Canvas(QWidget):
                 self.repaint()
             elif self.selected_shape:
                 self.selected_shape_copy = self.selected_shape.copy()
+                self.prev_point = pos
                 self.repaint()
             return
 
@@ -357,11 +361,11 @@ class Canvas(QWidget):
         Moves a point x,y to within the boundaries of the canvas.
         :return: (x,y,snapped) where snapped is True if x or y were changed, False if not.
         """
-        if x < 0 or x > self.pixmap.width() or y < 0 or y > self.pixmap.height():
-            x = max(x, 0)
-            y = max(y, 0)
-            x = min(x, self.pixmap.width())
-            y = min(y, self.pixmap.height())
+        w = self.pixmap.width() - 1
+        h = self.pixmap.height() - 1
+        if x < 0 or x > w or y < 0 or y > h:
+            x = min(max(x, 0), w)
+            y = min(max(y, 0), h)
             return x, y, True
 
         return x, y, False
@@ -370,9 +374,8 @@ class Canvas(QWidget):
         index, shape = self.h_vertex, self.h_shape
         point = shape[index]
         if self.out_of_pixmap(pos):
-            size = self.pixmap.size()
-            clipped_x = min(max(0, pos.x()), size.width())
-            clipped_y = min(max(0, pos.y()), size.height())
+            clipped_x = min(max(0, pos.x()), self.pixmap.width() - 1)
+            clipped_y = min(max(0, pos.y()), self.pixmap.height() - 1)
             pos = QPointF(clipped_x, clipped_y)
 
         if self.draw_square:
@@ -413,7 +416,7 @@ class Canvas(QWidget):
             pos += QPointF(min(0, self.pixmap.width() - o2.x()),
                            min(0, self.pixmap.height() - o2.y()))
         dp = pos - self.prev_point
-        if dp:
+        if not dp.isNull():
             shape.move_by(dp)
             self.prev_point = pos
             return True
@@ -470,11 +473,19 @@ class Canvas(QWidget):
 
         temp = self.pixmap
         if self.overlay_color:
-            temp = QPixmap(self.pixmap)
-            painter = QPainter(temp)
-            painter.setCompositionMode(painter.CompositionMode_Overlay)
-            painter.fillRect(temp.rect(), self.overlay_color)
-            painter.end()
+            if (self._cached_overlay_pixmap is None
+                    or self._cached_overlay_color != self.overlay_color
+                    or self._cached_overlay_pixmap.size() != self.pixmap.size()):
+                self._cached_overlay_pixmap = QPixmap(self.pixmap)
+                painter = QPainter(self._cached_overlay_pixmap)
+                painter.setCompositionMode(painter.CompositionMode_Overlay)
+                painter.fillRect(self._cached_overlay_pixmap.rect(), self.overlay_color)
+                painter.end()
+                self._cached_overlay_color = QColor(self.overlay_color)
+            temp = self._cached_overlay_pixmap
+        else:
+            self._cached_overlay_pixmap = None
+            self._cached_overlay_color = None
 
         p.drawPixmap(0, 0, temp)
         Shape.scale = self.scale
@@ -505,13 +516,11 @@ class Canvas(QWidget):
             p.drawLine(0, int(self.prev_point.y()), int(self.pixmap.width()), int(self.prev_point.y()))
 
         self.setAutoFillBackground(True)
-        if self.verified:
+        if self._last_verified_bg != self.verified:
+            self._last_verified_bg = self.verified
             pal = self.palette()
-            pal.setColor(self.backgroundRole(), QColor(184, 239, 38, 128))
-            self.setPalette(pal)
-        else:
-            pal = self.palette()
-            pal.setColor(self.backgroundRole(), QColor(232, 232, 232, 255))
+            bg = QColor(184, 239, 38, 128) if self.verified else QColor(232, 232, 232, 255)
+            pal.setColor(self.backgroundRole(), bg)
             self.setPalette(pal)
 
         p.end()
@@ -530,7 +539,7 @@ class Canvas(QWidget):
         return QPointF(x, y)
 
     def out_of_pixmap(self, p):
-        w, h = self.pixmap.width(), self.pixmap.height()
+        w, h = self.pixmap.width() - 1, self.pixmap.height() - 1
         return not (0 <= p.x() <= w and 0 <= p.y() <= h)
 
     def finalise(self):
@@ -607,8 +616,8 @@ class Canvas(QWidget):
         self.repaint()
 
     def move_out_of_bound(self, step):
-        points = [p1 + p2 for p1, p2 in zip(self.selected_shape.points, [step] * 4)]
-        return True in map(self.out_of_pixmap, points)
+        points = [p + step for p in self.selected_shape.points]
+        return any(self.out_of_pixmap(p) for p in points)
 
     def set_last_label(self, text, line_color=None, fill_color=None):
         assert text
@@ -638,6 +647,8 @@ class Canvas(QWidget):
 
     def load_pixmap(self, pixmap):
         self.pixmap = pixmap
+        self._cached_overlay_pixmap = None
+        self._cached_overlay_color = None
         self.shapes = []
         self.repaint()
 

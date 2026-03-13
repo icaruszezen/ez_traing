@@ -471,6 +471,9 @@ class PredefinedLabelsDialog(QDialog):
         return labels
 
     def _save_and_close(self):
+        if not self._classes_file:
+            QMessageBox.warning(self, "提示", "未指定标签文件路径")
+            return
         content = self._text_edit.toPlainText()
         try:
             parent_dir = os.path.dirname(self._classes_file)
@@ -509,7 +512,7 @@ class AnnotationWindow(labelimg_module.MainWindow):
             self.setParent(parent)
             self.setWindowFlags(Qt.Widget)
 
-        self._copied_shapes = None
+        self._copied_shapes = []
 
         _apply_fluent_style(self)
         self._setup_dock_title_bars()
@@ -631,6 +634,9 @@ class AnnotationWindow(labelimg_module.MainWindow):
             return
 
         new_label = self.label_hist[idx]
+        if not new_label:
+            self.status("标签为空，无法变更")
+            return
         if shape.label == new_label:
             return
 
@@ -768,6 +774,10 @@ class AnnotationWindow(labelimg_module.MainWindow):
         shape.difficult = bool(snapshot.get("difficult", False))
         shape.fill = bool(snapshot.get("fill", False))
         shape.close()
+
+        rect = shape.bounding_rect()
+        if rect.width() < 1 or rect.height() < 1:
+            return None, False
 
         line_color = snapshot.get("line_color")
         if line_color:

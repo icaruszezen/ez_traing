@@ -1,4 +1,3 @@
-import codecs
 import os
 
 from ez_traing.labeling.constants import DEFAULT_ENCODING
@@ -24,7 +23,9 @@ class YOLOWriter:
         bnd_box['difficult'] = difficult
         self.box_list.append(bnd_box)
 
-    def bnd_box_to_yolo_line(self, box, class_list=[]):
+    def bnd_box_to_yolo_line(self, box, class_list=None):
+        if class_list is None:
+            class_list = []
         x_min = box['xmin']
         x_max = box['xmax']
         y_min = box['ymin']
@@ -44,29 +45,25 @@ class YOLOWriter:
 
         return class_index, x_center, y_center, w, h
 
-    def save(self, class_list=[], target_file=None):
-        out_file = None
-        out_class_file = None
+    def save(self, class_list=None, target_file=None):
+        if class_list is None:
+            class_list = []
 
         if target_file is None:
-            out_file = open(
-                self.filename + TXT_EXT, 'w', encoding=ENCODE_METHOD)
+            out_path = self.filename + TXT_EXT
             classes_file = os.path.join(os.path.dirname(os.path.abspath(self.filename)), "classes.txt")
-            out_class_file = open(classes_file, 'w')
         else:
-            out_file = codecs.open(target_file, 'w', encoding=ENCODE_METHOD)
+            out_path = target_file
             classes_file = os.path.join(os.path.dirname(os.path.abspath(target_file)), "classes.txt")
-            out_class_file = open(classes_file, 'w')
 
-        for box in self.box_list:
-            class_index, x_center, y_center, w, h = self.bnd_box_to_yolo_line(box, class_list)
-            out_file.write("%d %.6f %.6f %.6f %.6f\n" % (class_index, x_center, y_center, w, h))
+        with open(out_path, 'w', encoding=ENCODE_METHOD) as out_file:
+            for box in self.box_list:
+                class_index, x_center, y_center, w, h = self.bnd_box_to_yolo_line(box, class_list)
+                out_file.write("%d %.6f %.6f %.6f %.6f\n" % (class_index, x_center, y_center, w, h))
 
-        for c in class_list:
-            out_class_file.write(c + '\n')
-
-        out_class_file.close()
-        out_file.close()
+        with open(classes_file, 'w', encoding=ENCODE_METHOD) as out_class_file:
+            for c in class_list:
+                out_class_file.write(c + '\n')
 
 
 class YoloReader:
@@ -81,8 +78,8 @@ class YoloReader:
         else:
             self.class_list_path = class_list_path
 
-        classes_file = open(self.class_list_path, 'r')
-        self.classes = classes_file.read().strip('\n').split('\n')
+        with open(self.class_list_path, 'r', encoding=ENCODE_METHOD) as classes_file:
+            self.classes = classes_file.read().strip('\n').split('\n')
 
         img_size = [image.height(), image.width(),
                     1 if image.isGrayscale() else 3]
@@ -99,7 +96,12 @@ class YoloReader:
         self.shapes.append((label, points, None, None, difficult))
 
     def yolo_line_to_shape(self, class_index, x_center, y_center, w, h):
-        label = self.classes[int(class_index)]
+        idx = int(class_index)
+        if idx < 0 or idx >= len(self.classes):
+            raise ValueError(
+                f"class_index {idx} out of range (classes.txt has {len(self.classes)} entries)"
+            )
+        label = self.classes[idx]
 
         x_min = max(float(x_center) - float(w) / 2, 0)
         x_max = min(float(x_center) + float(w) / 2, 1)
@@ -114,8 +116,8 @@ class YoloReader:
         return label, x_min, y_min, x_max, y_max
 
     def parse_yolo_format(self):
-        bnd_box_file = open(self.file_path, 'r')
-        for bndBox in bnd_box_file:
-            class_index, x_center, y_center, w, h = bndBox.strip().split(' ')
-            label, x_min, y_min, x_max, y_max = self.yolo_line_to_shape(class_index, x_center, y_center, w, h)
-            self.add_shape(label, x_min, y_min, x_max, y_max, False)
+        with open(self.file_path, 'r', encoding=ENCODE_METHOD) as bnd_box_file:
+            for bndBox in bnd_box_file:
+                class_index, x_center, y_center, w, h = bndBox.strip().split(' ')
+                label, x_min, y_min, x_max, y_max = self.yolo_line_to_shape(class_index, x_center, y_center, w, h)
+                self.add_shape(label, x_min, y_min, x_max, y_max, False)

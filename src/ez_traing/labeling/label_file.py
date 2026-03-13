@@ -103,6 +103,8 @@ class LabelFile(object):
 
     @staticmethod
     def convert_points_to_bnd_box(points):
+        if not points:
+            return 0, 0, 0, 0
         x_min = float('inf')
         y_min = float('inf')
         x_max = float('-inf')
@@ -115,9 +117,9 @@ class LabelFile(object):
             x_max = max(x, x_max)
             y_max = max(y, y_max)
 
-        if x_min < 1:
-            x_min = 1
-        if y_min < 1:
-            y_min = 1
+        if x_min < 0:
+            x_min = 0
+        if y_min < 0:
+            y_min = 0
 
         return int(x_min), int(y_min), int(x_max), int(y_max)

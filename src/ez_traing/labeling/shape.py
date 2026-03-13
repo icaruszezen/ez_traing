@@ -84,15 +84,15 @@ class Shape(object):
 
             line_path.moveTo(self.points[0])
 
+            vertex_color = Shape.vertex_fill_color
             for i, p in enumerate(self.points):
                 line_path.lineTo(p)
-                self.draw_vertex(vertex_path, i)
+                vertex_color = self._draw_vertex(vertex_path, i)
             if self.is_closed():
                 line_path.lineTo(self.points[0])
 
             painter.drawPath(line_path)
             painter.drawPath(vertex_path)
-            vertex_color = getattr(self, '_current_vertex_color', Shape.vertex_fill_color)
             painter.fillPath(vertex_path, vertex_color)
 
             if self.paint_label:
@@ -107,55 +107,60 @@ class Shape(object):
                     font.setPointSize(self.label_font_size)
                     font.setBold(True)
                     painter.setFont(font)
-                    if self.label is None:
-                        self.label = ""
+                    label_text = self.label or ""
                     if min_y < min_y_label:
                         min_y += min_y_label
-                    painter.drawText(int(min_x), int(min_y), self.label)
+                    painter.drawText(int(min_x), int(min_y), label_text)
 
             if self.fill:
                 color = self.select_fill_color if self.selected else self.fill_color
                 painter.fillPath(line_path, color)
 
-    def draw_vertex(self, path, i):
+    def _draw_vertex(self, path, i):
+        """Build vertex geometry in *path* and return the vertex fill color."""
         d = self.point_size / self.scale
         shape = self.point_type
         point = self.points[i]
         if i == self._highlight_index:
             size, shape = self._highlight_settings[self._highlight_mode]
             d *= size
-        if self._highlight_index is not None:
-            current_vertex_color = self.h_vertex_fill_color
-        else:
-            current_vertex_color = Shape.vertex_fill_color
-        self._current_vertex_color = current_vertex_color
+        vertex_color = self.h_vertex_fill_color if self._highlight_index is not None else Shape.vertex_fill_color
         if shape == self.P_SQUARE:
             path.addRect(point.x() - d / 2, point.y() - d / 2, d, d)
         elif shape == self.P_ROUND:
             path.addEllipse(point, d / 2.0, d / 2.0)
         else:
             assert False, "unsupported vertex shape"
+        return vertex_color
 
     def nearest_vertex(self, point, epsilon):
+        min_dist = epsilon
         index = None
         for i, p in enumerate(self.points):
             dist = distance(p - point)
-            if dist <= epsilon:
+            if dist <= min_dist:
                 index = i
-                epsilon = dist
+                min_dist = dist
         return index
 
     def contains_point(self, point):
         return self.make_path().contains(point)
 
     def make_path(self):
+        if not self.points:
+            return QPainterPath()
         path = QPainterPath(self.points[0])
         for p in self.points[1:]:
             path.lineTo(p)
         return path
 
     def bounding_rect(self):
-        return self.make_path().boundingRect()
+        rect = self.make_path().boundingRect()
+        if rect.width() < 1:
+            rect.setWidth(1)
+        if rect.height() < 1:
+            rect.setHeight(1)
+        return rect
 
     def move_by(self, offset):
         self.points = [p + offset for p in self.points]
@@ -176,10 +181,8 @@ class Shape(object):
         shape.fill = self.fill
         shape.selected = self.selected
         shape._closed = self._closed
-        if self.line_color != Shape.line_color:
-            shape.line_color = self.line_color
-        if self.fill_color != Shape.fill_color:
-            shape.fill_color = self.fill_color
+        shape.line_color = self.line_color
+        shape.fill_color = self.fill_color
         shape.difficult = self.difficult
         return shape
 

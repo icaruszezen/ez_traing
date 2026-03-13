@@ -1,3 +1,4 @@
+import logging
 import re
 import os
 import sys
@@ -5,6 +6,8 @@ import locale
 from pathlib import Path
 
 from ez_traing.labeling.ustr import ustr
+
+logger = logging.getLogger(__name__)
 
 if getattr(sys, "frozen", False):
     _LABELING_ROOT = Path(sys._MEIPASS) / "ez_traing" / "labeling"
@@ -30,16 +33,18 @@ class StringBundle:
     def get_bundle(cls, locale_str=None):
         if locale_str is None:
             try:
-                locale_str = locale.getdefaultlocale()[0] if locale.getdefaultlocale() and len(
-                    locale.getdefaultlocale()) > 0 else os.getenv('LANG')
+                loc = locale.getlocale()
+                locale_str = loc[0] if loc and loc[0] else os.getenv('LANG', 'en')
             except Exception:
-                print('Invalid locale')
+                logger.warning('Invalid locale, falling back to en')
                 locale_str = 'en'
 
         return StringBundle(cls.__create_key, locale_str)
 
     def get_string(self, string_id):
-        assert (string_id in self.id_to_message), "Missing string id : " + string_id
+        if string_id not in self.id_to_message:
+            logger.warning("Missing string id: %s", string_id)
+            return string_id
         return self.id_to_message[string_id]
 
     def __create_lookup_fallback_list(self, locale_str):
@@ -63,6 +68,8 @@ class StringBundle:
                 if not line or line.startswith("#"):
                     continue
                 key_value = line.split("=")
+                if len(key_value) < 2:
+                    continue
                 key = key_value[0].strip()
                 value = "=".join(key_value[1:]).strip().strip('"')
                 self.id_to_message[key] = value

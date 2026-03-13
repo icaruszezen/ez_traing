@@ -22,7 +22,7 @@ class CreateMLWriter:
 
     def write(self):
         if os.path.isfile(self.output_file):
-            with open(self.output_file, "r") as file:
+            with open(self.output_file, "r", encoding=ENCODE_METHOD) as file:
                 input_data = file.read()
                 output_dict = json.loads(input_data)
         else:
@@ -80,8 +80,6 @@ class CreateMLWriter:
             y_min = y2
             y_max = y1
         width = x_max - x_min
-        if width < 0:
-            width = width * -1
         height = y_max - y_min
         x = x_min + width / 2
         y = y_min + height / 2
@@ -100,20 +98,18 @@ class CreateMLReader:
             print("JSON decoding failed")
 
     def parse_json(self):
-        with open(self.json_path, "r") as file:
+        with open(self.json_path, "r", encoding=ENCODE_METHOD) as file:
             input_data = file.read()
 
         output_list = json.loads(input_data)
 
-        if output_list:
-            self.verified = output_list[0].get("verified", False)
-
-        if len(self.shapes) > 0:
-            self.shapes = []
+        self.shapes = []
         for image in output_list:
             if image["image"] == self.filename:
+                self.verified = image.get("verified", False)
                 for shape in image["annotations"]:
                     self.add_shape(shape["label"], shape["coordinates"])
+                break
 
     def add_shape(self, label, bnd_box):
         x_min = bnd_box["x"] - (bnd_box["width"] / 2)
@@ -121,7 +117,7 @@ class CreateMLReader:
         x_max = bnd_box["x"] + (bnd_box["width"] / 2)
         y_max = bnd_box["y"] + (bnd_box["height"] / 2)
         points = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
-        self.shapes.append((label, points, None, None, True))
+        self.shapes.append((label, points, None, None, False))
 
     def get_shapes(self):
         return self.shapes

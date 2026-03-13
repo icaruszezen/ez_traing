@@ -1,5 +1,5 @@
-import sys
 import codecs
+import logging
 from xml.etree import ElementTree
 from xml.etree.ElementTree import Element, SubElement
 
@@ -7,6 +7,8 @@ from lxml import etree
 
 from ez_traing.labeling.constants import DEFAULT_ENCODING
 from ez_traing.labeling.ustr import ustr
+
+logger = logging.getLogger(__name__)
 
 XML_EXT = '.xml'
 ENCODE_METHOD = DEFAULT_ENCODING
@@ -84,14 +86,18 @@ class PascalVocWriter:
             pose = SubElement(object_item, 'pose')
             pose.text = "Unspecified"
             truncated = SubElement(object_item, 'truncated')
-            if int(float(each_object['ymax'])) == int(float(self.img_size[0])) or (int(float(each_object['ymin'])) == 1):
-                truncated.text = "1"
-            elif (int(float(each_object['xmax'])) == int(float(self.img_size[1]))) or (int(float(each_object['xmin'])) == 1):
+            xmin = int(float(each_object['xmin']))
+            ymin = int(float(each_object['ymin']))
+            xmax = int(float(each_object['xmax']))
+            ymax = int(float(each_object['ymax']))
+            img_h = int(float(self.img_size[0]))
+            img_w = int(float(self.img_size[1]))
+            if xmin <= 0 or ymin <= 0 or xmax >= img_w or ymax >= img_h:
                 truncated.text = "1"
             else:
                 truncated.text = "0"
             difficult = SubElement(object_item, 'difficult')
-            difficult.text = str(bool(each_object['difficult']) & 1)
+            difficult.text = str(int(bool(each_object['difficult'])))
             bnd_box = SubElement(object_item, 'bndbox')
             x_min = SubElement(bnd_box, 'xmin')
             x_min.text = str(each_object['xmin'])
@@ -105,16 +111,10 @@ class PascalVocWriter:
     def save(self, target_file=None):
         root = self.gen_xml()
         self.append_objects(root)
-        out_file = None
-        if target_file is None:
-            out_file = codecs.open(
-                self.filename + XML_EXT, 'w', encoding=ENCODE_METHOD)
-        else:
-            out_file = codecs.open(target_file, 'w', encoding=ENCODE_METHOD)
-
+        out_path = target_file if target_file is not None else self.filename + XML_EXT
         prettify_result = self.prettify(root)
-        out_file.write(prettify_result.decode('utf8'))
-        out_file.close()
+        with codecs.open(out_path, 'w', encoding=ENCODE_METHOD) as out_file:
+            out_file.write(prettify_result.decode('utf8'))
 
 
 class PascalVocReader:
@@ -126,16 +126,16 @@ class PascalVocReader:
         try:
             self.parse_xml()
         except Exception:
-            pass
+            logger.error("Failed to parse XML: %s", file_path, exc_info=True)
 
     def get_shapes(self):
         return self.shapes
 
     def add_shape(self, label, bnd_box, difficult):
-        x_min = int(float(bnd_box.find('xmin').text))
-        y_min = int(float(bnd_box.find('ymin').text))
-        x_max = int(float(bnd_box.find('xmax').text))
-        y_max = int(float(bnd_box.find('ymax').text))
+        x_min = round(float(bnd_box.find('xmin').text))
+        y_min = round(float(bnd_box.find('ymin').text))
+        x_max = round(float(bnd_box.find('xmax').text))
+        y_max = round(float(bnd_box.find('ymax').text))
         points = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
         self.shapes.append((label, points, None, None, difficult))
 
