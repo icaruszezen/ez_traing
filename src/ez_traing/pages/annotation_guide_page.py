@@ -8,10 +8,11 @@ import io
 import logging
 import os
 import random
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import cv2
 import numpy as np
@@ -51,6 +52,9 @@ from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 
 logger = logging.getLogger(__name__)
 
+_SHEET_NAME_INVALID_RE = re.compile(r'[/\\*?\[\]:\'"!]')
+_IMG_CACHE_MAX = 8
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -88,22 +92,49 @@ class LabelScanWorker(QThread):
 
     # -- helpers --
 
-    def _load_classes(self, directories: List[str]) -> List[str]:
-        for d in directories:
-            for candidate in [
-                Path(d) / "classes.txt",
-                Path(d) / "labels" / "classes.txt",
-                Path(d) / ".." / "classes.txt",
-            ]:
-                if candidate.exists():
-                    try:
-                        with open(candidate, "r", encoding="utf-8") as f:
-                            names = [l.strip() for l in f if l.strip()]
-                        if names:
-                            return names
-                    except Exception:
-                        pass
+    @staticmethod
+    def _load_classes_for_dir(directory: str) -> List[str]:
+        d = Path(directory)
+        for candidate in [
+            d / "classes.txt",
+            d / "labels" / "classes.txt",
+            d / ".." / "classes.txt",
+        ]:
+            if candidate.exists():
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        names = [line.strip() for line in f if line.strip()]
+                    if names:
+                        return names
+                except Exception:
+                    pass
         return []
+
+    @staticmethod
+    def _find_image_by_stem(annotation_path: Path) -> Optional[str]:
+        """按标注文件的 stem 查找对应图片，支持 labels/->images/ 和 Annotations/->JPEGImages/ 回退。"""
+        stem = annotation_path.stem
+        parent = annotation_path.parent
+
+        for ext in SUPPORTED_IMAGE_FORMATS:
+            candidate = parent / f"{stem}{ext}"
+            if candidate.exists():
+                return str(candidate)
+
+        parent_name = parent.name.lower()
+        fallback_dirs: List[Path] = []
+        if parent_name == "labels":
+            fallback_dirs.append(parent.parent / "images")
+        elif parent_name == "annotations":
+            fallback_dirs.append(parent.parent / "JPEGImages")
+
+        for fb_dir in fallback_dirs:
+            if fb_dir.is_dir():
+                for ext in SUPPORTED_IMAGE_FORMATS:
+                    candidate = fb_dir / f"{stem}{ext}"
+                    if candidate.exists():
+                        return str(candidate)
+        return None
 
     def _parse_voc(self, xml_path: Path) -> List[BBoxRecord]:
         records: List[BBoxRecord] = []
@@ -115,12 +146,10 @@ class LabelScanWorker(QThread):
                 return records
             img_path = str(xml_path.parent / filename_el.text.strip())
             if not os.path.isfile(img_path):
-                img_path = str(xml_path.with_suffix(""))
-                for ext in SUPPORTED_IMAGE_FORMATS:
-                    candidate = str(xml_path.with_suffix(ext))
-                    if os.path.isfile(candidate):
-                        img_path = candidate
-                        break
+                found = self._find_image_by_stem(xml_path)
+                if found is None:
+                    return records
+                img_path = found
             for obj in root.findall("object"):
                 name = (obj.findtext("name") or "").strip()
                 bnd = obj.find("bndbox")
@@ -142,24 +171,26 @@ class LabelScanWorker(QThread):
         return records
 
     def _parse_yolo(
-        self, txt_path: Path, class_names: List[str]
+        self,
+        txt_path: Path,
+        class_names: List[str],
+        size_cache: Dict[str, tuple],
     ) -> List[BBoxRecord]:
         records: List[BBoxRecord] = []
-        img_path = None
-        for ext in SUPPORTED_IMAGE_FORMATS:
-            candidate = txt_path.with_suffix(ext)
-            if candidate.exists():
-                img_path = str(candidate)
-                break
+        img_path = self._find_image_by_stem(txt_path)
         if img_path is None:
             return records
 
-        try:
-            pil_img = PILImage.open(img_path)
-            img_w, img_h = pil_img.size
-            pil_img.close()
-        except Exception:
-            return records
+        cached = size_cache.get(img_path)
+        if cached is not None:
+            img_w, img_h = cached
+        else:
+            try:
+                with PILImage.open(img_path) as pil_img:
+                    img_w, img_h = pil_img.size
+                size_cache[img_path] = (img_w, img_h)
+            except Exception:
+                return records
 
         try:
             with open(txt_path, "r", encoding="utf-8") as f:
@@ -199,27 +230,34 @@ class LabelScanWorker(QThread):
 
     def run(self):
         label_map: Dict[str, List[BBoxRecord]] = {}
-        class_names = self._load_classes(self._directories)
+        dir_classes: Dict[str, List[str]] = {}
+        for d in self._directories:
+            dir_classes[d] = self._load_classes_for_dir(d)
 
-        all_files: List[Path] = []
+        annotation_files: List[tuple] = []
         for d in self._directories:
             if not os.path.isdir(d):
                 continue
             for root, _, files in os.walk(d):
                 for fname in files:
-                    all_files.append(Path(root) / fname)
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext == ".xml" or (ext == ".txt" and fname != "classes.txt"):
+                        annotation_files.append((Path(root) / fname, d))
 
-        total = len(all_files)
+        size_cache: Dict[str, tuple] = {}
+        total = len(annotation_files)
         processed = 0
-        for fpath in all_files:
+        for fpath, parent_dir in annotation_files:
             if self._cancelled:
                 break
             suffix = fpath.suffix.lower()
             records: List[BBoxRecord] = []
             if suffix == ".xml":
                 records = self._parse_voc(fpath)
-            elif suffix == ".txt" and fpath.name != "classes.txt":
-                records = self._parse_yolo(fpath, class_names)
+            elif suffix == ".txt":
+                records = self._parse_yolo(
+                    fpath, dir_classes.get(parent_dir, []), size_cache
+                )
 
             for rec in records:
                 label_map.setdefault(rec.label, []).append(rec)
@@ -263,11 +301,13 @@ class GuideExportWorker(QThread):
     @staticmethod
     def _crop_expanded(
         img: np.ndarray, bbox: BBoxRecord, expand_ratio: float
-    ) -> np.ndarray:
+    ) -> Optional[np.ndarray]:
         """以 bbox 中心为基准扩大裁剪，并在截图上绘制 bbox 框线。"""
         h, w = img.shape[:2]
         bw = bbox.x_max - bbox.x_min
         bh = bbox.y_max - bbox.y_min
+        if bw <= 0 or bh <= 0:
+            return None
         cx = (bbox.x_min + bbox.x_max) / 2
         cy = (bbox.y_min + bbox.y_max) / 2
         new_w = bw * expand_ratio
@@ -276,14 +316,16 @@ class GuideExportWorker(QThread):
         y1 = max(0, int(cy - new_h / 2))
         x2 = min(w, int(cx + new_w / 2))
         y2 = min(h, int(cy + new_h / 2))
+        if x2 <= x1 or y2 <= y1:
+            return None
         crop = img[y1:y2, x1:x2].copy()
 
-        # 绘制原始 bbox 在裁剪坐标系中的位置
         bx1 = bbox.x_min - x1
         by1 = bbox.y_min - y1
         bx2 = bbox.x_max - x1
         by2 = bbox.y_max - y1
-        cv2.rectangle(crop, (bx1, by1), (bx2, by2), (0, 0, 255), 2)
+        thickness = max(1, min(crop.shape[:2]) // 150)
+        cv2.rectangle(crop, (bx1, by1), (bx2, by2), (0, 0, 255), thickness)
         return crop
 
     def run(self):
@@ -305,8 +347,8 @@ class GuideExportWorker(QThread):
 
     @staticmethod
     def _encode_to_bytesio(img: np.ndarray) -> Optional[io.BytesIO]:
-        """将 OpenCV 图像编码为 PNG 并返回 BytesIO 对象。"""
-        success, buf = cv2.imencode(".png", img)
+        """将 OpenCV 图像编码为 JPEG 并返回 BytesIO 对象。"""
+        success, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not success:
             return None
         bio = io.BytesIO(buf.tobytes())
@@ -325,6 +367,9 @@ class GuideExportWorker(QThread):
         header_font_white = Font(bold=True, size=12, color="FFFFFF")
         wrap_align = Alignment(wrap_text=True, vertical="center", horizontal="center")
 
+        img_cache: Dict[str, np.ndarray] = {}
+        used_names: Set[str] = set()
+
         for label in self._selected_labels:
             if self._cancelled:
                 self.finished.emit(False, "已取消")
@@ -334,8 +379,16 @@ class GuideExportWorker(QThread):
             sample_count = min(self._samples_per_label, len(records))
             sampled = random.sample(records, sample_count) if records else []
 
-            safe_name = label[:28].replace("/", "_").replace("\\", "_").replace("*", "").replace("?", "")
-            ws = wb.create_sheet(title=safe_name or "unknown")
+            safe_name = _SHEET_NAME_INVALID_RE.sub("_", label)[:28].strip()
+            base = safe_name or "unknown"
+            name = base
+            counter = 1
+            while name in used_names:
+                suffix = f"_{counter}"
+                name = base[:28 - len(suffix)] + suffix
+                counter += 1
+            used_names.add(name)
+            ws = wb.create_sheet(title=name)
 
             # -- header row --
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(sample_count, 1))
@@ -355,7 +408,7 @@ class GuideExportWorker(QThread):
 
             # -- image row --
             img_row = 3
-            ws.row_dimensions[img_row].height = 280
+            max_img_h = 0
 
             for col_idx, rec in enumerate(sampled):
                 if self._cancelled:
@@ -363,11 +416,19 @@ class GuideExportWorker(QThread):
                     return
 
                 try:
-                    raw = self._imread_unicode(rec.image_path)
+                    raw = img_cache.pop(rec.image_path, None)
                     if raw is None:
-                        logger.warning("Cannot read image: %s", rec.image_path)
-                        continue
+                        raw = self._imread_unicode(rec.image_path)
+                        if raw is None:
+                            logger.warning("Cannot read image: %s", rec.image_path)
+                            continue
+                        if len(img_cache) >= _IMG_CACHE_MAX:
+                            del img_cache[next(iter(img_cache))]
+                    img_cache[rec.image_path] = raw
+
                     crop = self._crop_expanded(raw, rec, self._expand_ratio)
+                    if crop is None:
+                        continue
 
                     max_dim = 400
                     ch, cw = crop.shape[:2]
@@ -386,10 +447,16 @@ class GuideExportWorker(QThread):
                     xl_img.width = int(cw * scale)
                     xl_img.height = int(ch * scale)
                     col_letter = get_column_letter(col_idx + 1)
-                    ws.column_dimensions[col_letter].width = 44
+                    ws.column_dimensions[col_letter].width = max(
+                        ws.column_dimensions[col_letter].width or 0,
+                        xl_img.width / 7 + 2,
+                    )
                     ws.add_image(xl_img, f"{col_letter}{img_row}")
+                    max_img_h = max(max_img_h, xl_img.height)
                 except Exception:
                     logger.debug("Failed to process bbox for %s", rec.image_path, exc_info=True)
+
+            ws.row_dimensions[img_row].height = max(max_img_h * 0.75 + 15, 100)
 
             # -- source info row --
             info_row = img_row + 1
@@ -423,6 +490,7 @@ class AnnotationGuidePage(QWidget):
         self._label_map: Dict[str, List[BBoxRecord]] = {}
         self._scan_worker: Optional[LabelScanWorker] = None
         self._export_worker: Optional[GuideExportWorker] = None
+        self._archive_to_projects: Dict[str, Set[str]] = {}
         self._setup_ui()
 
     def set_project_manager(self, pm):
@@ -478,6 +546,7 @@ class AnnotationGuidePage(QWidget):
         self._dataset_list = QListWidget(card)
         self._dataset_list.setMinimumHeight(140)
         self._dataset_list.setMaximumHeight(260)
+        self._dataset_list.itemChanged.connect(self._on_dataset_item_changed)
         layout.addWidget(self._dataset_list)
 
         return card
@@ -585,12 +654,15 @@ class AnnotationGuidePage(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_dataset_list(self):
+        self._dataset_list.blockSignals(True)
         self._dataset_list.clear()
+        self._archive_to_projects.clear()
         if self._project_manager is None:
+            self._dataset_list.blockSignals(False)
             return
 
         pm = self._project_manager
-        added_ids = set()
+        added_ids: Set[str] = set()
 
         for arc in pm.archives.values():
             item = QListWidgetItem(f"[归档] {arc.name}")
@@ -599,6 +671,7 @@ class AnnotationGuidePage(QWidget):
             item.setData(Qt.UserRole, ("archive", arc.id))
             self._dataset_list.addItem(item)
             added_ids.update(arc.project_ids)
+            self._archive_to_projects[arc.id] = set(arc.project_ids)
 
         for proj in pm.projects.values():
             if proj.is_virtual or proj.id.startswith("archive::"):
@@ -609,6 +682,23 @@ class AnnotationGuidePage(QWidget):
             item.setCheckState(Qt.Unchecked)
             item.setData(Qt.UserRole, ("project", proj.id))
             self._dataset_list.addItem(item)
+        self._dataset_list.blockSignals(False)
+
+    def _on_dataset_item_changed(self, item: QListWidgetItem):
+        kind, obj_id = item.data(Qt.UserRole)
+        if kind != "archive":
+            return
+        child_ids = self._archive_to_projects.get(obj_id)
+        if not child_ids:
+            return
+        state = item.checkState()
+        self._dataset_list.blockSignals(True)
+        for i in range(self._dataset_list.count()):
+            child = self._dataset_list.item(i)
+            child_kind, child_id = child.data(Qt.UserRole)
+            if child_kind == "project" and child_id in child_ids:
+                child.setCheckState(state)
+        self._dataset_list.blockSignals(False)
 
     def _get_selected_directories(self) -> List[str]:
         """返回所有勾选项对应的目录列表（去重）。"""
