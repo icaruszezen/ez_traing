@@ -3,7 +3,7 @@
 import os
 import sys
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
@@ -223,6 +223,13 @@ class StatusCard(CardWidget):
         layout.addLayout(text_layout)
         layout.addStretch()
 
+    def set_status(self, status_ok: bool, content: str):
+        self.content_label.setText(content)
+        if status_ok:
+            self.content_label.setStyleSheet("color: #0f9d58;")
+        else:
+            self.content_label.setStyleSheet("color: #db4437;")
+
 
 class InstallSuggestionCard(CardWidget):
     """安装建议卡片"""
@@ -318,6 +325,8 @@ class InstallSuggestionCard(CardWidget):
 
 class DepsInstallCard(CardWidget):
     """一键安装依赖卡片（frozen 模式下使用）"""
+
+    deps_installed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -485,6 +494,7 @@ class DepsInstallCard(CardWidget):
                 duration=5000,
                 parent=self.window(),
             )
+            self.deps_installed.emit()
         else:
             self._log_edit.append(f"\n{message}")
             InfoBar.error(
@@ -566,12 +576,12 @@ class SettingsPage(QWidget):
             ultralytics_version_text = f"加载失败: {err[:100]}"
         else:
             ultralytics_version_text = "未安装"
-        ultralytics_card = InfoCard(
+        self._ultralytics_card = InfoCard(
             FIF.APPLICATION, "Ultralytics 版本", ultralytics_version_text, self
         )
         if not ultralytics_installed:
-            ultralytics_card.content_label.setStyleSheet("color: #db4437;")
-        content_layout.addWidget(ultralytics_card)
+            self._ultralytics_card.content_label.setStyleSheet("color: #db4437;")
+        content_layout.addWidget(self._ultralytics_card)
 
         # PyTorch 版本卡片
         if torch_installed:
@@ -581,10 +591,10 @@ class SettingsPage(QWidget):
             torch_version_text = f"加载失败: {err[:100]}"
         else:
             torch_version_text = "未安装"
-        torch_card = InfoCard(FIF.DEVELOPER_TOOLS, "PyTorch 版本", torch_version_text, self)
+        self._torch_card = InfoCard(FIF.DEVELOPER_TOOLS, "PyTorch 版本", torch_version_text, self)
         if not torch_installed:
-            torch_card.content_label.setStyleSheet("color: #db4437;")
-        content_layout.addWidget(torch_card)
+            self._torch_card.content_label.setStyleSheet("color: #db4437;")
+        content_layout.addWidget(self._torch_card)
 
         content_layout.addSpacing(10)
 
@@ -600,22 +610,22 @@ class SettingsPage(QWidget):
             cuda_status_text = "已启用" if cuda_available else "未启用"
             cuda_status_ok = cuda_available
 
-        cuda_status_card = StatusCard(
+        self._cuda_status_card = StatusCard(
             FIF.SPEED_HIGH if cuda_status_ok else FIF.SPEED_OFF,
             "CUDA 加速",
             cuda_status_ok,
             cuda_status_text,
             self,
         )
-        content_layout.addWidget(cuda_status_card)
+        content_layout.addWidget(self._cuda_status_card)
 
         # CUDA 版本
         if not torch_installed:
             cuda_version_text = "未知"
         else:
             cuda_version_text = pkg_info["cuda_version"] if pkg_info["cuda_version"] else "不可用"
-        cuda_version_card = InfoCard(FIF.TAG, "CUDA 版本", cuda_version_text, self)
-        content_layout.addWidget(cuda_version_card)
+        self._cuda_version_card = InfoCard(FIF.TAG, "CUDA 版本", cuda_version_text, self)
+        content_layout.addWidget(self._cuda_version_card)
 
         # GPU 设备信息
         if not torch_installed:
@@ -625,8 +635,8 @@ class SettingsPage(QWidget):
         else:
             gpu_info = "未检测到 (需要 CUDA 支持)"
 
-        gpu_device_card = InfoCard(FIF.ROBOT, "GPU 设备", gpu_info, self)
-        content_layout.addWidget(gpu_device_card)
+        self._gpu_device_card = InfoCard(FIF.ROBOT, "GPU 设备", gpu_info, self)
+        content_layout.addWidget(self._gpu_device_card)
 
         # 安装建议部分
         need_install = not ultralytics_installed or not torch_installed
@@ -639,6 +649,7 @@ class SettingsPage(QWidget):
 
             if is_frozen():
                 deps_card = DepsInstallCard(self)
+                deps_card.deps_installed.connect(self._refresh_env_info)
                 content_layout.addWidget(deps_card)
             else:
                 if not ultralytics_installed:
@@ -664,6 +675,53 @@ class SettingsPage(QWidget):
 
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
+
+    # ── 环境信息刷新 ──────────────────────────────────────────────
+
+    def _refresh_env_info(self):
+        """重新检测包版本和 GPU 状态并更新卡片显示。"""
+        pkg_info = _get_package_info()
+
+        ul_ver = pkg_info["ultralytics_version"]
+        if ul_ver:
+            self._ultralytics_card.set_content(ul_ver)
+            self._ultralytics_card.content_label.setStyleSheet("")
+        elif pkg_info.get("ultralytics_error"):
+            err = pkg_info["ultralytics_error"]
+            self._ultralytics_card.set_content(f"加载失败: {err[:100]}")
+            self._ultralytics_card.content_label.setStyleSheet("color: #db4437;")
+        else:
+            self._ultralytics_card.set_content("未安装")
+            self._ultralytics_card.content_label.setStyleSheet("color: #db4437;")
+
+        t_ver = pkg_info["torch_version"]
+        if t_ver:
+            self._torch_card.set_content(t_ver)
+            self._torch_card.content_label.setStyleSheet("")
+        elif pkg_info.get("torch_error"):
+            err = pkg_info["torch_error"]
+            self._torch_card.set_content(f"加载失败: {err[:100]}")
+            self._torch_card.content_label.setStyleSheet("color: #db4437;")
+        else:
+            self._torch_card.set_content("未安装")
+            self._torch_card.content_label.setStyleSheet("color: #db4437;")
+
+        torch_installed = t_ver is not None
+        cuda_available = pkg_info["cuda_available"]
+
+        if not torch_installed:
+            self._cuda_status_card.set_status(False, "未知 (需先安装 PyTorch)")
+            self._cuda_version_card.set_content("未知")
+            self._gpu_device_card.set_content("未知 (需先安装 PyTorch)")
+        else:
+            self._cuda_status_card.set_status(cuda_available,
+                                              "已启用" if cuda_available else "未启用")
+            cv = pkg_info["cuda_version"]
+            self._cuda_version_card.set_content(cv if cv else "不可用")
+            if cuda_available and pkg_info["gpu_names"]:
+                self._gpu_device_card.set_content(", ".join(pkg_info["gpu_names"]))
+            else:
+                self._gpu_device_card.set_content("未检测到 (需要 CUDA 支持)")
 
     # ── GitHub 加速设置 ────────────────────────────────────────────
 
@@ -915,21 +973,39 @@ class SettingsPage(QWidget):
             )
             return
 
-        self._update_btn.setEnabled(False)
-        self._update_btn.setText("下载中...")
+        self._update_btn.setText("取消下载")
+        self._update_btn.setEnabled(True)
+        self._update_btn.clicked.disconnect()
+        self._update_btn.clicked.connect(self._on_cancel_download)
         self._progress_bar.setValue(0)
         self._progress_bar.show()
 
-        self._download_worker = DownloadWorker(release_info.download_url, self)
+        self._download_worker = DownloadWorker(
+            release_info.download_url, release_info.sha256, self,
+        )
         self._download_worker.progress.connect(self._progress_bar.setValue)
         self._download_worker.finished.connect(self._on_download_finished)
         self._download_worker.error.connect(self._on_download_error)
         self._download_worker.start()
 
-    def _on_download_finished(self, extracted_dir: str):
+    def _on_cancel_download(self):
+        if self._download_worker and self._download_worker.isRunning():
+            self._download_worker.cancel()
+            self._update_btn.setEnabled(False)
+            self._update_btn.setText("正在取消...")
+
+    def _restore_update_btn(self):
         self._progress_bar.hide()
         self._update_btn.setText("检查更新")
         self._update_btn.setEnabled(True)
+        try:
+            self._update_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self._update_btn.clicked.connect(self._on_check_update)
+
+    def _on_download_finished(self, extracted_dir: str):
+        self._restore_update_btn()
 
         dlg = MessageBox(
             "下载完成",
@@ -943,9 +1019,7 @@ class SettingsPage(QWidget):
             apply_update_and_restart(extracted_dir)
 
     def _on_download_error(self, msg: str):
-        self._progress_bar.hide()
-        self._update_btn.setEnabled(True)
-        self._update_btn.setText("检查更新")
+        self._restore_update_btn()
         InfoBar.error(
             title="下载失败",
             content=msg,

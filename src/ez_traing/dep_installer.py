@@ -124,7 +124,8 @@ class InstallWorker(QThread):
             self.install_finished.emit(False, "安装已取消")
             return
         if not ok:
-            self.install_finished.emit(False, "ultralytics 安装失败，请查看上方日志")
+            hint = self._diagnose_failure(self._last_output)
+            self.install_finished.emit(False, f"ultralytics 安装失败。{hint}")
             return
 
         self.log.emit("\n── 安装 PyTorch ──────────────────────────")
@@ -141,14 +142,18 @@ class InstallWorker(QThread):
             self.install_finished.emit(False, "安装已取消")
             return
         if not ok:
-            self.install_finished.emit(False, "PyTorch 安装失败，请查看上方日志")
+            hint = self._diagnose_failure(self._last_output)
+            self.install_finished.emit(False, f"PyTorch 安装失败。{hint}")
             return
 
         self.install_finished.emit(True, "安装完成！重启应用后生效。")
 
+    _last_output: str = ""
+
     def _run_pip(self, python: str, args: list) -> bool:
         cmd = [python, *args]
         self.log.emit(f"$ {' '.join(cmd)}\n")
+        output_lines: list[str] = []
         try:
             self._process = subprocess.Popen(
                 cmd,
@@ -162,12 +167,31 @@ class InstallWorker(QThread):
             for line in self._process.stdout:
                 if self._cancelled:
                     break
-                self.log.emit(line.rstrip())
+                stripped = line.rstrip()
+                output_lines.append(stripped)
+                self.log.emit(stripped)
             self._process.wait()
             ok = self._process.returncode == 0
             self._process = None
+            self._last_output = "\n".join(output_lines[-50:])
             return ok
         except Exception as exc:
             self.log.emit(f"执行失败: {exc}")
             self._process = None
+            self._last_output = str(exc)
             return False
+
+    @staticmethod
+    def _diagnose_failure(output: str) -> str:
+        lowered = output.lower()
+        if "no space left" in lowered or "disk" in lowered and "full" in lowered:
+            return "磁盘空间不足，请清理后重试"
+        if "connectionerror" in lowered or "timed out" in lowered or "connection" in lowered and "refused" in lowered:
+            return "网络连接失败，请检查网络或代理设置"
+        if "permission" in lowered and "denied" in lowered:
+            return "权限不足，请尝试以管理员身份运行"
+        if "no matching distribution" in lowered:
+            return "未找到匹配的包版本，请检查 Python 版本和 CUDA 选项是否正确"
+        if "could not find a version" in lowered:
+            return "找不到合适的版本，可能是索引源不可用"
+        return "请查看上方日志获取详细信息"
