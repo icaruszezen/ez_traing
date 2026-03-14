@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import traceback
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -58,16 +59,19 @@ class _YoloToVocWorker(QThread):
         try:
             self._do_convert()
         except Exception as e:
+            self.log.emit(traceback.format_exc())
             self.finished.emit(False, f"转换失败: {e}")
 
     def _do_convert(self):
         from PIL import Image
 
         self.log.emit("读取类别文件...")
-        classes = self._read_classes(self._classes_file)
+        classes, cls_warnings = self._read_classes(self._classes_file)
         if not classes:
             self.finished.emit(False, "classes.txt 为空或读取失败")
             return
+        for w in cls_warnings:
+            self.log.emit(f"[警告] {w}")
         self.log.emit(f"共 {len(classes)} 个类别: {', '.join(classes)}")
 
         self.log.emit(f"扫描图片目录: {self._image_dir}")
@@ -83,7 +87,9 @@ class _YoloToVocWorker(QThread):
         self.log.emit(f"找到 {len(image_files)} 张图片")
 
         self.log.emit(f"扫描标注目录: {self._label_dir}")
-        label_map = self._build_label_map(self._label_dir)
+        label_map, lbl_warnings = self._build_label_map(self._label_dir)
+        for w in lbl_warnings:
+            self.log.emit(f"[警告] {w}")
         self.log.emit(f"找到 {len(label_map)} 个标注文件")
 
         output_path = Path(self._output_dir)
@@ -113,11 +119,15 @@ class _YoloToVocWorker(QThread):
                     width, height = im.size
                     depth = len(im.getbands())
 
-                boxes = self._parse_yolo_txt(label_path, classes, width, height)
+                boxes, skipped_lines = self._parse_yolo_txt(
+                    label_path, classes, width, height
+                )
 
                 if not boxes:
+                    tail = f" ({skipped_lines} 行被跳过)" if skipped_lines else ""
                     self.log.emit(
                         f"[{i + 1}/{total}] {img_path.name} - 标注为空，跳过"
+                        + tail
                     )
                     skipped += 1
                     continue
@@ -147,9 +157,10 @@ class _YoloToVocWorker(QThread):
 
                 shutil.copy2(str(img_path), str(out_img))
 
-                self.log.emit(
-                    f"[{i + 1}/{total}] {img_path.name} - {len(boxes)} 个目标"
-                )
+                detail = f"[{i + 1}/{total}] {img_path.name} - {len(boxes)} 个目标"
+                if skipped_lines:
+                    detail += f" ({skipped_lines} 行被跳过)"
+                self.log.emit(detail)
                 converted += 1
 
             except Exception as e:
@@ -161,22 +172,39 @@ class _YoloToVocWorker(QThread):
         self.finished.emit(True, msg)
 
     @staticmethod
-    def _read_classes(path: str) -> List[str]:
+    def _read_classes(path: str) -> Tuple[List[str], List[str]]:
+        """返回 ``(classes, warnings)``。使用 utf-8-sig 自动去除 BOM。"""
+        warnings: List[str] = []
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return [line.strip() for line in f if line.strip()]
+            with open(path, "r", encoding="utf-8-sig") as f:
+                classes = [line.strip() for line in f if line.strip()]
         except Exception:
-            return []
+            return [], []
+        seen: Dict[str, int] = {}
+        for i, name in enumerate(classes):
+            if name in seen:
+                warnings.append(
+                    f"类别 '{name}' 重复 (行 {seen[name] + 1} 和 {i + 1})"
+                )
+            else:
+                seen[name] = i
+        return classes, warnings
 
     @staticmethod
-    def _build_label_map(label_dir: str) -> Dict[str, Path]:
+    def _build_label_map(label_dir: str) -> Tuple[Dict[str, Path], List[str]]:
+        """返回 ``(stem->path 映射, warnings)``，同名文件只保留首次出现的。"""
         result: Dict[str, Path] = {}
+        warnings: List[str] = []
         for f in Path(label_dir).rglob("*.txt"):
             if f.name.lower() == "classes.txt":
                 continue
-            if f.stem not in result:
+            if f.stem in result:
+                warnings.append(
+                    f"标注 '{f.stem}.txt' 存在多个: 使用 {result[f.stem]}，忽略 {f}"
+                )
+            else:
                 result[f.stem] = f
-        return result
+        return result, warnings
 
     @staticmethod
     def _parse_yolo_txt(
@@ -184,12 +212,18 @@ class _YoloToVocWorker(QThread):
         classes: List[str],
         img_w: int,
         img_h: int,
-    ) -> List[Tuple[str, int, int, int, int]]:
+    ) -> Tuple[List[Tuple[str, int, int, int, int]], int]:
+        """返回 ``(boxes, skipped)``，*skipped* 为因格式/越界而跳过的行数。"""
         boxes: List[Tuple[str, int, int, int, int]] = []
+        skipped = 0
         with open(txt_path, "r", encoding="utf-8") as f:
             for line in f:
-                parts = line.strip().split()
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                parts = stripped.split()
                 if len(parts) < 5:
+                    skipped += 1
                     continue
                 try:
                     cls_id = int(parts[0])
@@ -198,19 +232,21 @@ class _YoloToVocWorker(QThread):
                     w = float(parts[3])
                     h = float(parts[4])
                 except (ValueError, IndexError):
+                    skipped += 1
                     continue
 
                 if cls_id < 0 or cls_id >= len(classes):
+                    skipped += 1
                     continue
 
-                xmin = max(0, int((xc - w / 2) * img_w))
-                ymin = max(0, int((yc - h / 2) * img_h))
-                xmax = min(img_w, int((xc + w / 2) * img_w))
-                ymax = min(img_h, int((yc + h / 2) * img_h))
+                xmin = max(0, round((xc - w / 2) * img_w))
+                ymin = max(0, round((yc - h / 2) * img_h))
+                xmax = min(img_w, round((xc + w / 2) * img_w))
+                ymax = min(img_h, round((yc + h / 2) * img_h))
 
                 if xmax > xmin and ymax > ymin:
                     boxes.append((classes[cls_id], xmin, ymin, xmax, ymax))
-        return boxes
+        return boxes, skipped
 
 
 class _YoloToVocCard(CardWidget):
@@ -220,6 +256,13 @@ class _YoloToVocCard(CardWidget):
         super().__init__(parent)
         self._worker: Optional[_YoloToVocWorker] = None
         self._setup_ui()
+        self.destroyed.connect(self._stop_worker)
+
+    def _stop_worker(self):
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker.wait(3000)
+            self._worker = None
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -341,6 +384,29 @@ class _YoloToVocCard(CardWidget):
             InfoBar.error(
                 "错误",
                 "请选择输出目录",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+            )
+            return
+
+        try:
+            out_resolved = Path(output_dir).resolve()
+            img_resolved = Path(image_dir).resolve()
+            if out_resolved == img_resolved or img_resolved in out_resolved.parents:
+                InfoBar.error(
+                    "错误",
+                    "输出目录不能与图片目录相同或是其父目录",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                )
+                return
+            out_resolved.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            InfoBar.error(
+                "错误",
+                f"输出目录无效或无法创建: {e}",
                 parent=self,
                 position=InfoBarPosition.TOP,
                 duration=3000,
