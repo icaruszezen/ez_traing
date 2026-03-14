@@ -3,7 +3,14 @@
 from typing import Tuple
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QFont, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QFont, QFontInfo, QPainter, QPixmap
+
+_CJK_FONT_FAMILIES = [
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "WenQuanYi Micro Hei",
+]
 
 
 def draw_box_label(
@@ -18,6 +25,7 @@ def draw_box_label(
     ``y_bottom`` 是标签区域的底边 y 坐标（通常等于检测框的 y_min）。
     ``bg_color_bgr`` 为 BGR 三元组，与 OpenCV 的颜色约定一致。
     """
+    painter.save()
     fm = painter.fontMetrics()
     tw = fm.horizontalAdvance(text)
     th = fm.height()
@@ -31,13 +39,18 @@ def draw_box_label(
     painter.setPen(QColor(255, 255, 255))
     painter.setBrush(Qt.NoBrush)
     painter.drawText(x + pad, y_bottom - fm.descent() - pad, text)
+    painter.restore()
 
 
 def begin_label_painter(pixmap: QPixmap, pixel_size: int = 16) -> QPainter:
     """创建用于在 QPixmap 上绘制标签文字的 QPainter。"""
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    font = QFont("Microsoft YaHei", -1)
+    font = QFont()
+    for family in _CJK_FONT_FAMILIES:
+        font.setFamily(family)
+        if QFontInfo(font).family() == family:
+            break
     font.setPixelSize(pixel_size)
     painter.setFont(font)
     return painter

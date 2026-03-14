@@ -1,8 +1,9 @@
+import logging
 import os
 
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon as FIF
-from qfluentwidgets import FluentWindow, NavigationItemPosition
+from qfluentwidgets import FluentWindow, InfoBar, NavigationItemPosition
 
 from ez_traing.pages.annotation_guide_page import AnnotationGuidePage
 from ez_traing.pages.annotation_page import AnnotationPage
@@ -17,21 +18,34 @@ from ez_traing.pages.template_matching_page import TemplateMatchingPage
 from ez_traing.pages.tools_page import ToolsPage
 from ez_traing.pages.train_page import TrainPage
 
+logger = logging.getLogger(__name__)
+
 
 class LazyPageHost(QWidget):
-    """延迟创建页面容器，首次展示时再初始化真实页面。"""
+    """延迟创建页面容器，首次展示时再初始化真实页面。仅限 GUI 线程调用。"""
 
     def __init__(self, factory, parent=None):
         super().__init__(parent)
         self._factory = factory
         self._page = None
+        self._failed = False
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
     def ensure_page(self):
-        if self._page is None:
-            self._page = self._factory()
-            self._layout.addWidget(self._page)
+        if self._page is None and not self._failed:
+            try:
+                self._page = self._factory()
+                self._layout.addWidget(self._page)
+            except Exception:
+                self._failed = True
+                logger.exception("Failed to create page")
+                InfoBar.error(
+                    "页面加载失败",
+                    "无法初始化此功能页面，请检查日志",
+                    parent=self,
+                    duration=5000,
+                )
         return self._page
 
     def showEvent(self, event):
@@ -48,15 +62,6 @@ class AppWindow(FluentWindow):
         self.dataset_page = DatasetPage(self)
         self.data_prep_page = DataPrepPage(self)
         self.prelabeling_page = PrelabelingPage(self)
-        self._annotation_page = None
-        self._batch_annotation_page = None
-        self._template_matching_page = None
-        self._script_annotation_page = None
-        self._train_page = None
-        self._eval_page = None
-        self._tools_page = None
-        self._annotation_guide_page = None
-        self._settings_page = None
         self.annotation_page = LazyPageHost(self._create_annotation_page, self)
         self.batch_annotation_page = LazyPageHost(self._create_batch_annotation_page, self)
         self.template_matching_page = LazyPageHost(self._create_template_matching_page, self)
@@ -107,62 +112,41 @@ class AppWindow(FluentWindow):
         self.dataset_page.request_batch_annotation.connect(self._on_request_batch_annotation)
 
     def _create_annotation_page(self):
-        if self._annotation_page is None:
-            self._annotation_page = AnnotationPage(self)
-        return self._annotation_page
+        return AnnotationPage(self)
 
     def _create_batch_annotation_page(self):
-        if self._batch_annotation_page is None:
-            self._batch_annotation_page = BatchAnnotationPage(self)
-            self._batch_annotation_page.set_project_manager(
-                self.dataset_page.project_manager
-            )
-        return self._batch_annotation_page
+        page = BatchAnnotationPage(self)
+        page.set_project_manager(self.dataset_page.project_manager)
+        return page
 
     def _create_template_matching_page(self):
-        if self._template_matching_page is None:
-            self._template_matching_page = TemplateMatchingPage(self)
-            self._template_matching_page.set_project_manager(
-                self.dataset_page.project_manager
-            )
-        return self._template_matching_page
+        page = TemplateMatchingPage(self)
+        page.set_project_manager(self.dataset_page.project_manager)
+        return page
 
     def _create_script_annotation_page(self):
-        if self._script_annotation_page is None:
-            self._script_annotation_page = ScriptAnnotationPage(self)
-            self._script_annotation_page.set_project_manager(
-                self.dataset_page.project_manager
-            )
-        return self._script_annotation_page
+        page = ScriptAnnotationPage(self)
+        page.set_project_manager(self.dataset_page.project_manager)
+        return page
 
     def _create_train_page(self):
-        if self._train_page is None:
-            self._train_page = TrainPage(self)
-        return self._train_page
+        return TrainPage(self)
 
     def _create_eval_page(self):
-        if self._eval_page is None:
-            self._eval_page = EvalPage(self)
-            self._eval_page.set_project_manager(self.dataset_page.project_manager)
-        return self._eval_page
+        page = EvalPage(self)
+        page.set_project_manager(self.dataset_page.project_manager)
+        return page
 
     def _create_tools_page(self):
-        if self._tools_page is None:
-            self._tools_page = ToolsPage(self)
-        return self._tools_page
+        return ToolsPage(self)
 
     def _create_annotation_guide_page(self):
-        if self._annotation_guide_page is None:
-            self._annotation_guide_page = AnnotationGuidePage(self)
-            self._annotation_guide_page.set_project_manager(
-                self.dataset_page.project_manager
-            )
-        return self._annotation_guide_page
+        page = AnnotationGuidePage(self)
+        page.set_project_manager(self.dataset_page.project_manager)
+        return page
 
     def _create_settings_page(self):
-        if self._settings_page is None:
-            self._settings_page = SettingsPage(self)
-        return self._settings_page
+        return SettingsPage(self)
 
     def _annotation_window(self):
         annotation_page = self.annotation_page.ensure_page()

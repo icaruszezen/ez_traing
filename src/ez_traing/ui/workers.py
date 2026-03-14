@@ -49,6 +49,8 @@ class ThumbnailLoader(QThread):
 
     def cancel(self):
         self._is_cancelled = True
+        if self.isRunning():
+            self.wait(3000)
 
 
 class ImageScanWorker(QThread):
@@ -79,7 +81,8 @@ class ImageScanWorker(QThread):
             for directory in self._directories:
                 if self._cancelled:
                     break
-                for root, _, files in os.walk(directory):
+                for root, dirs, files in os.walk(directory):
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
                     if self._cancelled:
                         break
                     for f in files:
