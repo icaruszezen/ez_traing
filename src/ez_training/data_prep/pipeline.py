@@ -25,7 +25,13 @@ from ez_training.data_prep.converter import (
     save_classes,
     write_yolo_label,
 )
-from ez_training.data_prep.models import DataPrepConfig, DataPrepSummary, DatasetSample
+from ez_training.data_prep.models import (
+    IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
+    DataPrepConfig,
+    DataPrepSummary,
+    DatasetSample,
+    load_custom_class_names,
+)
 from ez_training.data_prep.splitter import split_train_val
 
 
@@ -95,12 +101,24 @@ class DataPrepPipeline:
         if self.config.custom_classes_file:
             custom_path = Path(self.config.custom_classes_file)
             self._log(log_callback, f"使用自定义类别文件: {custom_path}")
-            with open(custom_path, "r", encoding="utf-8") as f:
-                class_names = [line.strip() for line in f if line.strip()]
+            class_names = load_custom_class_names(custom_path)
             if not class_names:
                 raise ValueError(f"自定义类别文件为空: {custom_path}")
             self._log(log_callback, f"自定义类别 ({len(class_names)}): {class_names}")
             class_set = set(class_names)
+            selected_class_names = list(self.config.selected_classes)
+            selected_class_set = set(selected_class_names)
+            self._log(
+                log_callback,
+                f"已选导出类别 ({len(selected_class_names)}/{len(class_names)}): {selected_class_names}",
+            )
+            self._log(
+                log_callback,
+                "整图导出规则: 含未选类别则整图不导出"
+                if self.config.image_export_rule
+                == IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED
+                else "整图导出规则: 只要有选择的类别就导出",
+            )
             unknown_labels = set()
             for sample in samples:
                 for box in sample.boxes:
@@ -116,6 +134,19 @@ class DataPrepPipeline:
                 raise ValueError(
                     f"自定义类别 {class_names} 与数据中的实际标签 {sorted(all_labels)} "
                     f"完全不匹配，导出将产生全空标注。请检查自定义类别文件。"
+                )
+            samples, excluded_by_rule, trimmed_box_images = self._filter_samples_by_selected_classes(
+                samples,
+                selected_class_set,
+            )
+            if excluded_by_rule:
+                self._log(log_callback, f"按类别规则排除图片: {excluded_by_rule} 张")
+            if trimmed_box_images:
+                self._log(log_callback, f"导出时移除了未选类别标注的图片: {trimmed_box_images} 张")
+            if not samples:
+                raise ValueError(
+                    "按所选类别和导出规则过滤后，没有可导出的样本。"
+                    "请检查勾选的类别或调整整图导出规则。"
                 )
         else:
             merged_existing: List[str] = []
@@ -340,6 +371,49 @@ class DataPrepPipeline:
         if workers <= 0:
             workers = os.cpu_count() or 1
         return max(1, min(workers, self.config.augment_times))
+
+    def _filter_samples_by_selected_classes(
+        self,
+        samples: List[DatasetSample],
+        selected_class_set: Set[str],
+    ) -> Tuple[List[DatasetSample], int, int]:
+        filtered_samples: List[DatasetSample] = []
+        excluded_images = 0
+        trimmed_box_images = 0
+
+        for sample in samples:
+            if not sample.boxes:
+                filtered_samples.append(sample)
+                continue
+
+            selected_boxes = [
+                box for box in sample.boxes if box.label in selected_class_set
+            ]
+            if len(selected_boxes) == len(sample.boxes):
+                filtered_samples.append(sample)
+                continue
+
+            if not selected_boxes:
+                excluded_images += 1
+                continue
+
+            if self.config.image_export_rule == IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED:
+                excluded_images += 1
+                continue
+
+            trimmed_box_images += 1
+            filtered_samples.append(
+                DatasetSample(
+                    image_path=sample.image_path,
+                    xml_path=sample.xml_path,
+                    boxes=selected_boxes,
+                    image_width=sample.image_width,
+                    image_height=sample.image_height,
+                    image_mode=sample.image_mode,
+                )
+            )
+
+        return filtered_samples, excluded_images, trimmed_box_images
 
     def _export_split(
         self,

@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from PyQt5.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
@@ -33,7 +33,13 @@ from qfluentwidgets import (
 
 from ez_training.common.constants import get_config_dir, open_path
 from ez_training.data_prep.augmentation import get_augmentation_specs, is_albumentations_available
-from ez_training.data_prep.models import DataPrepConfig, DataPrepSummary
+from ez_training.data_prep.models import (
+    IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
+    IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED,
+    DataPrepConfig,
+    DataPrepSummary,
+    load_custom_class_names,
+)
 from ez_training.data_prep.pipeline import DataPrepPipeline
 
 
@@ -80,6 +86,7 @@ class DataPrepPage(QWidget):
 
     _STATE_FILE = "data_prep_ui_state.json"
     _DEFAULT_AUG_METHODS = {"hflip", "brightness_contrast", "gauss_noise"}
+    _DEFAULT_IMAGE_EXPORT_RULE = IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED
 
     _AUGMENTATION_HELP_TEXTS: Dict[str, str] = {
         "hflip": "作用：左右翻转，提升模型对目标左右朝向变化的鲁棒性。\n建议场景：目标本身左右对称或方向不敏感（如通用工业件、自然物体）。",
@@ -108,6 +115,12 @@ class DataPrepPage(QWidget):
         self._current_project_id: Optional[str] = None
         self._worker: Optional[DataPrepWorker] = None
         self._method_checkboxes: Dict[str, CheckBox] = {}
+        self._custom_class_checkboxes: Dict[str, CheckBox] = {}
+        self._loaded_custom_classes_path = ""
+        self._loaded_custom_class_names: List[str] = []
+        self._pending_selected_custom_classes: Optional[List[str]] = None
+        self._pending_custom_class_names_snapshot: Optional[List[str]] = None
+        self._custom_classes_load_error: Optional[str] = None
         self._run_started_at: Optional[float] = None
         self._last_progress_percent = -1
         self._last_progress_update_at = 0.0
@@ -337,6 +350,62 @@ class DataPrepPage(QWidget):
         self.custom_classes_hint.setEnabled(False)
         layout.addWidget(self.custom_classes_hint)
 
+        self.custom_classes_options_widget = QWidget(card)
+        custom_options_layout = QVBoxLayout(self.custom_classes_options_widget)
+        custom_options_layout.setContentsMargins(0, 0, 0, 0)
+        custom_options_layout.setSpacing(8)
+
+        classes_header_layout = QHBoxLayout()
+        classes_header_layout.addWidget(StrongBodyLabel("导出类别", self.custom_classes_options_widget))
+        classes_header_layout.addStretch()
+        self.select_all_custom_classes_btn = PushButton("全选", self.custom_classes_options_widget)
+        self.select_all_custom_classes_btn.clicked.connect(self._select_all_custom_classes)
+        classes_header_layout.addWidget(self.select_all_custom_classes_btn)
+        self.clear_custom_classes_btn = PushButton("清空", self.custom_classes_options_widget)
+        self.clear_custom_classes_btn.clicked.connect(self._clear_custom_classes_selection)
+        classes_header_layout.addWidget(self.clear_custom_classes_btn)
+        custom_options_layout.addLayout(classes_header_layout)
+
+        self.custom_classes_status_label = CaptionLabel(
+            "选择 classes.txt 后将自动生成可选类别列表",
+            self.custom_classes_options_widget,
+        )
+        self.custom_classes_status_label.setWordWrap(True)
+        custom_options_layout.addWidget(self.custom_classes_status_label)
+
+        self.custom_classes_scroll = ScrollArea(self.custom_classes_options_widget)
+        self.custom_classes_scroll.setWidgetResizable(True)
+        self.custom_classes_scroll.setMinimumHeight(140)
+        self.custom_classes_scroll.setMaximumHeight(180)
+        self.custom_classes_scroll.setStyleSheet(
+            "QScrollArea { border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 8px; background: transparent; }"
+        )
+        self.custom_classes_container = QWidget(self.custom_classes_scroll)
+        self.custom_classes_layout = QVBoxLayout(self.custom_classes_container)
+        self.custom_classes_layout.setContentsMargins(12, 8, 12, 8)
+        self.custom_classes_layout.setSpacing(6)
+        self.custom_classes_layout.setAlignment(Qt.AlignTop)
+        self.custom_classes_scroll.setWidget(self.custom_classes_container)
+        custom_options_layout.addWidget(self.custom_classes_scroll)
+
+        export_rule_layout = QHBoxLayout()
+        export_rule_layout.addWidget(BodyLabel("整图导出规则", self.custom_classes_options_widget))
+        self.image_export_rule_combo = ComboBox(self.custom_classes_options_widget)
+        self.image_export_rule_combo.addItem(
+            "含未选类别则整图不导出",
+            userData=IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
+        )
+        self.image_export_rule_combo.addItem(
+            "只要有选择的类别就导出",
+            userData=IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED,
+        )
+        export_rule_layout.addWidget(self.image_export_rule_combo)
+        export_rule_layout.addStretch()
+        custom_options_layout.addLayout(export_rule_layout)
+
+        self.custom_classes_options_widget.setVisible(False)
+        layout.addWidget(self.custom_classes_options_widget)
+
         return card
 
     def _create_action_card(self) -> CardWidget:
@@ -501,6 +570,8 @@ class DataPrepPage(QWidget):
             cb.toggled.connect(self._save_ui_state)
         self.custom_classes_cb.toggled.connect(self._save_ui_state)
         self.custom_classes_edit.textChanged.connect(self._save_ui_state)
+        self.custom_classes_edit.textChanged.connect(self._on_custom_classes_path_changed)
+        self.image_export_rule_combo.currentIndexChanged.connect(self._save_ui_state)
 
     def _ui_state_dir(self) -> Path:
         state_dir = self._ui_state_path.parent
@@ -538,6 +609,141 @@ class DataPrepPage(QWidget):
             if normalized in {"0", "false", "no", "off"}:
                 return False
         return default
+
+    def _selected_custom_classes(self) -> List[str]:
+        return [
+            name
+            for name, cb in self._custom_class_checkboxes.items()
+            if cb.isChecked()
+        ]
+
+    def _get_image_export_rule(self) -> str:
+        rule = self.image_export_rule_combo.currentData()
+        if rule in {
+            IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
+            IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED,
+        }:
+            return rule
+        return self._DEFAULT_IMAGE_EXPORT_RULE
+
+    def _set_image_export_rule(self, rule: str) -> None:
+        for idx in range(self.image_export_rule_combo.count()):
+            if self.image_export_rule_combo.itemData(idx) == rule:
+                self.image_export_rule_combo.setCurrentIndex(idx)
+                return
+        self.image_export_rule_combo.setCurrentIndex(0)
+
+    def _clear_custom_class_widgets(self) -> None:
+        while self.custom_classes_layout.count():
+            item = self.custom_classes_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._custom_class_checkboxes.clear()
+
+    def _set_custom_class_selection(self, checked: bool) -> None:
+        if not self._custom_class_checkboxes:
+            return
+        for cb in self._custom_class_checkboxes.values():
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+        self._update_custom_classes_status()
+        self._save_ui_state()
+
+    def _select_all_custom_classes(self) -> None:
+        self._set_custom_class_selection(True)
+
+    def _clear_custom_classes_selection(self) -> None:
+        self._set_custom_class_selection(False)
+
+    def _on_custom_class_selection_changed(self) -> None:
+        self._update_custom_classes_status()
+        self._save_ui_state()
+
+    def _update_custom_classes_status(self) -> None:
+        total = len(self._custom_class_checkboxes)
+        selected = len(self._selected_custom_classes())
+
+        if self._custom_classes_load_error:
+            self.custom_classes_status_label.setText(self._custom_classes_load_error)
+        elif total == 0:
+            path = self.custom_classes_edit.text().strip()
+            if path:
+                self.custom_classes_status_label.setText("未从 classes.txt 读取到可用类别")
+            else:
+                self.custom_classes_status_label.setText("选择 classes.txt 后将自动生成可选类别列表")
+        else:
+            self.custom_classes_status_label.setText(f"已选择 {selected} / {total} 个类别")
+
+        controls_enabled = self.custom_classes_cb.isChecked() and total > 0
+        self.select_all_custom_classes_btn.setEnabled(controls_enabled)
+        self.clear_custom_classes_btn.setEnabled(controls_enabled)
+        self.image_export_rule_combo.setEnabled(controls_enabled)
+
+    def _refresh_custom_classes_options(self) -> None:
+        path = self.custom_classes_edit.text().strip()
+        self._custom_classes_load_error = None
+
+        preferred_selected: Optional[Set[str]] = None
+        known_class_names: Set[str] = set()
+        if self._pending_selected_custom_classes is not None:
+            preferred_selected = set(self._pending_selected_custom_classes)
+            known_class_names = set(self._pending_custom_class_names_snapshot or [])
+        elif path and path == self._loaded_custom_classes_path:
+            preferred_selected = set(self._selected_custom_classes())
+            known_class_names = set(self._loaded_custom_class_names)
+
+        if not path:
+            self._loaded_custom_classes_path = ""
+            self._loaded_custom_class_names = []
+            self._clear_custom_class_widgets()
+            self._pending_selected_custom_classes = None
+            self._pending_custom_class_names_snapshot = None
+            self._update_custom_classes_status()
+            return
+
+        try:
+            class_names = load_custom_class_names(path)
+        except (OSError, UnicodeError) as e:
+            self._loaded_custom_classes_path = path
+            self._loaded_custom_class_names = []
+            self._custom_classes_load_error = f"读取 classes.txt 失败: {e}"
+            self._clear_custom_class_widgets()
+            self._pending_selected_custom_classes = None
+            self._pending_custom_class_names_snapshot = None
+            self._update_custom_classes_status()
+            return
+
+        if not class_names:
+            self._loaded_custom_classes_path = path
+            self._loaded_custom_class_names = []
+            self._custom_classes_load_error = "classes.txt 为空，请至少保留一个类别"
+            self._clear_custom_class_widgets()
+            self._pending_selected_custom_classes = None
+            self._pending_custom_class_names_snapshot = None
+            self._update_custom_classes_status()
+            return
+
+        self._clear_custom_class_widgets()
+        for name in class_names:
+            cb = CheckBox(name, self.custom_classes_container)
+            should_check = True
+            if preferred_selected is not None and name in known_class_names:
+                should_check = name in preferred_selected
+            cb.setChecked(should_check)
+            cb.toggled.connect(self._on_custom_class_selection_changed)
+            self.custom_classes_layout.addWidget(cb)
+            self._custom_class_checkboxes[name] = cb
+
+        self._loaded_custom_classes_path = path
+        self._loaded_custom_class_names = list(class_names)
+        self._pending_selected_custom_classes = None
+        self._pending_custom_class_names_snapshot = None
+        self._update_custom_classes_status()
+
+    def _on_custom_classes_path_changed(self, _text: str) -> None:
+        self._refresh_custom_classes_options()
 
     def _get_aug_scope(self) -> str:
         scope = self.aug_scope_combo.currentData()
@@ -604,9 +810,24 @@ class DataPrepPage(QWidget):
             self.custom_classes_cb.setChecked(
                 self._safe_bool(state.get("use_custom_classes"), default=False)
             )
+            selected_export_classes = state.get("selected_export_classes")
+            if isinstance(selected_export_classes, list):
+                self._pending_selected_custom_classes = [
+                    str(item)
+                    for item in selected_export_classes
+                    if isinstance(item, str) and item.strip()
+                ]
+            class_snapshot = state.get("custom_class_names_snapshot")
+            if isinstance(class_snapshot, list):
+                self._pending_custom_class_names_snapshot = [
+                    str(item)
+                    for item in class_snapshot
+                    if isinstance(item, str) and item.strip()
+                ]
             custom_classes_file = state.get("custom_classes_file")
             if isinstance(custom_classes_file, str) and custom_classes_file.strip():
                 self.custom_classes_edit.setText(custom_classes_file.strip())
+            self._set_image_export_rule(str(state.get("image_export_rule", self._DEFAULT_IMAGE_EXPORT_RULE)))
         finally:
             self._restoring_ui_state = False
 
@@ -634,6 +855,9 @@ class DataPrepPage(QWidget):
             "overwrite_output": self.overwrite_cb.isChecked(),
             "use_custom_classes": self.custom_classes_cb.isChecked(),
             "custom_classes_file": self.custom_classes_edit.text().strip(),
+            "selected_export_classes": self._selected_custom_classes(),
+            "custom_class_names_snapshot": list(self._custom_class_checkboxes.keys()),
+            "image_export_rule": self._get_image_export_rule(),
         }
         try:
             self._ui_state_dir()
@@ -652,6 +876,9 @@ class DataPrepPage(QWidget):
         self.custom_classes_edit.setEnabled(enabled)
         self.browse_classes_btn.setEnabled(enabled)
         self.custom_classes_hint.setEnabled(enabled)
+        self.custom_classes_options_widget.setVisible(enabled)
+        self.custom_classes_options_widget.setEnabled(enabled)
+        self._refresh_custom_classes_options()
 
     def _browse_custom_classes(self):
         current = self.custom_classes_edit.text().strip()
@@ -737,6 +964,8 @@ class DataPrepPage(QWidget):
             augment_scope = self._get_aug_scope()
 
         custom_classes_file = None
+        selected_classes: List[str] = []
+        image_export_rule = self._DEFAULT_IMAGE_EXPORT_RULE
         if self.custom_classes_cb.isChecked():
             custom_classes_file = self.custom_classes_edit.text().strip() or None
             if not custom_classes_file:
@@ -747,6 +976,26 @@ class DataPrepPage(QWidget):
                     position=InfoBarPosition.TOP,
                 )
                 return
+
+        if self.custom_classes_cb.isChecked():
+            if self._custom_classes_load_error:
+                InfoBar.warning(
+                    title="提示",
+                    content=self._custom_classes_load_error,
+                    parent=self.window(),
+                    position=InfoBarPosition.TOP,
+                )
+                return
+            selected_classes = self._selected_custom_classes()
+            if not selected_classes:
+                InfoBar.warning(
+                    title="提示",
+                    content="请至少选择一个需要导出的类别",
+                    parent=self.window(),
+                    position=InfoBarPosition.TOP,
+                )
+                return
+            image_export_rule = self._get_image_export_rule()
 
         config = DataPrepConfig(
             dataset_name=project.name,
@@ -760,6 +1009,8 @@ class DataPrepPage(QWidget):
             skip_unlabeled=self.skip_unlabeled_cb.isChecked(),
             overwrite_output=self.overwrite_cb.isChecked(),
             custom_classes_file=custom_classes_file,
+            selected_classes=selected_classes,
+            image_export_rule=image_export_rule,
             dataset_dirs=dirs if len(dirs) > 1 else [],
         )
 
@@ -848,6 +1099,10 @@ class DataPrepPage(QWidget):
         custom_enabled = not running and self.custom_classes_cb.isChecked()
         self.custom_classes_edit.setEnabled(custom_enabled)
         self.browse_classes_btn.setEnabled(custom_enabled)
+        self.custom_classes_options_widget.setEnabled(custom_enabled)
+        self.select_all_custom_classes_btn.setEnabled(custom_enabled and bool(self._custom_class_checkboxes))
+        self.clear_custom_classes_btn.setEnabled(custom_enabled and bool(self._custom_class_checkboxes))
+        self.image_export_rule_combo.setEnabled(custom_enabled and bool(self._custom_class_checkboxes))
 
     def _log(self, text: str):
         timestamp = datetime.now().strftime("%H:%M:%S")

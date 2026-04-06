@@ -1,8 +1,22 @@
-"""数据准备流程数据模型。"""
+"""训练前数据准备数据模型。"""
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
+
+IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED = "exclude_if_any_unselected"
+IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED = "include_if_any_selected"
+VALID_IMAGE_EXPORT_RULES = {
+    IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
+    IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED,
+}
+
+
+def load_custom_class_names(custom_classes_file: Union[str, Path]) -> List[str]:
+    """读取自定义 classes.txt，保留原始顺序并忽略空行。"""
+    path = Path(custom_classes_file)
+    with open(path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip()]
 
 
 @dataclass
@@ -44,6 +58,8 @@ class DataPrepConfig:
     skip_unlabeled: bool = True
     overwrite_output: bool = True
     custom_classes_file: Optional[str] = None
+    selected_classes: List[str] = field(default_factory=list)
+    image_export_rule: str = IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED
     dataset_dirs: List[str] = field(default_factory=list)
 
     def validate(self) -> None:
@@ -61,14 +77,28 @@ class DataPrepConfig:
             raise ValueError("增强次数不能为负数")
         if self.augment_workers < 0:
             raise ValueError("增强线程数不能为负数")
+        if self.image_export_rule not in VALID_IMAGE_EXPORT_RULES:
+            raise ValueError(f"不支持的整图导出规则: {self.image_export_rule}")
+
         if self.custom_classes_file is not None:
-            p = Path(self.custom_classes_file)
-            if not p.exists():
-                raise ValueError(f"自定义类别文件不存在: {p}")
-            with open(p, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f if line.strip()]
-            if not lines:
-                raise ValueError(f"自定义类别文件为空: {p}")
+            path = Path(self.custom_classes_file)
+            if not path.exists():
+                raise ValueError(f"自定义类别文件不存在: {path}")
+
+            class_names = load_custom_class_names(path)
+            if not class_names:
+                raise ValueError(f"自定义类别文件为空: {path}")
+            if not self.selected_classes:
+                raise ValueError("请至少选择一个需要导出的类别")
+
+            class_set = set(class_names)
+            invalid_selected = [
+                name for name in self.selected_classes if name not in class_set
+            ]
+            if invalid_selected:
+                raise ValueError(
+                    f"所选导出类别不在自定义类别文件中: {invalid_selected}"
+                )
 
 
 @dataclass
