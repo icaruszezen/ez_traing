@@ -522,6 +522,33 @@ class ImageInfo:
     path: str
     is_annotated: bool
     image_type: str  # 小写扩展名，不含点，例如 jpg / png
+    labels: List[str] = field(default_factory=list)
+
+
+def _unique_labels(labels: List[str]) -> List[str]:
+    """按原顺序去重标签。"""
+    return list(dict.fromkeys(labels))
+
+
+def _matches_image_filters(
+    info: ImageInfo,
+    annotation_filter: str,
+    image_type_filter: str,
+    label_filter: str,
+) -> bool:
+    """判断单张图片是否命中当前筛选条件。"""
+    normalized_type = (image_type_filter or "").strip().lower()
+    normalized_label = (label_filter or "").strip()
+
+    if annotation_filter == "已标注" and not info.is_annotated:
+        return False
+    if annotation_filter == "未标注" and info.is_annotated:
+        return False
+    if normalized_type and normalized_type != "全部" and info.image_type != normalized_type:
+        return False
+    if normalized_label and normalized_label != "全部" and normalized_label not in info.labels:
+        return False
+    return True
 
 
 class ImageScanner(QThread):
@@ -624,6 +651,7 @@ class ImageScanner(QThread):
                     path=file_path,
                     is_annotated=is_annotated,
                     image_type=path.suffix.lower().lstrip("."),
+                    labels=_unique_labels(labels),
                 )
             )
             
@@ -1302,7 +1330,7 @@ class ImageListPanel(CardWidget):
     
     image_selected = pyqtSignal(str)  # image_path
     image_double_clicked = pyqtSignal(str)  # image_path
-    filters_changed = pyqtSignal(str, str)  # annotation_filter, type_filter
+    filters_changed = pyqtSignal(str, str, str)  # annotation_filter, type_filter, label_filter
     page_changed = pyqtSignal(list)  # 当前页的路径列表
     
     PAGE_SIZE = 200
@@ -1344,9 +1372,15 @@ class ImageListPanel(CardWidget):
 
         filter_layout.addWidget(CaptionLabel("类型:"))
         self.type_filter = QComboBox()
-        self.type_filter.addItem("全部")
+        self.type_filter.addItem("全部", "全部")
         self.type_filter.currentIndexChanged.connect(self._on_filters_changed)
         filter_layout.addWidget(self.type_filter)
+
+        filter_layout.addWidget(CaptionLabel("标签:"))
+        self.label_filter = QComboBox()
+        self.label_filter.addItem("全部", "全部")
+        self.label_filter.currentIndexChanged.connect(self._on_filters_changed)
+        filter_layout.addWidget(self.label_filter)
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
         
@@ -1494,6 +1528,7 @@ class ImageListPanel(CardWidget):
         self._update_page_controls()
         self.reset_filters()
         self.set_type_options([])
+        self.set_label_options([])
 
     def get_uncached_paths(self, paths: List[str]) -> List[str]:
         """Return the subset of *paths* not yet present in the thumbnail cache."""
@@ -1501,31 +1536,52 @@ class ImageListPanel(CardWidget):
 
     def set_type_options(self, image_types: List[str]):
         """设置类型筛选选项"""
-        current = self.type_filter.currentText()
+        current = self.type_filter.currentData()
         self.type_filter.blockSignals(True)
         self.type_filter.clear()
-        self.type_filter.addItem("全部")
+        self.type_filter.addItem("全部", "全部")
         for image_type in image_types:
-            self.type_filter.addItem(image_type.upper())
-        if current in ["全部", ""] or current not in [t.upper() for t in image_types]:
+            normalized = image_type.lower()
+            self.type_filter.addItem(normalized.upper(), normalized)
+        available = {t.lower() for t in image_types}
+        if current in [None, "", "全部"] or current not in available:
             self.type_filter.setCurrentIndex(0)
         else:
-            self.type_filter.setCurrentText(current)
+            self.type_filter.setCurrentText(str(current).upper())
         self.type_filter.blockSignals(False)
+
+    def set_label_options(self, labels: List[str]):
+        """设置标签筛选选项"""
+        current = self.label_filter.currentData()
+        self.label_filter.blockSignals(True)
+        self.label_filter.clear()
+        self.label_filter.addItem("全部", "全部")
+        for label in labels:
+            self.label_filter.addItem(label, label)
+        available = set(labels)
+        if current in [None, "", "全部"] or current not in available:
+            self.label_filter.setCurrentIndex(0)
+        else:
+            self.label_filter.setCurrentText(str(current))
+        self.label_filter.blockSignals(False)
 
     def reset_filters(self):
         """重置筛选"""
         self.annotation_filter.blockSignals(True)
         self.type_filter.blockSignals(True)
+        self.label_filter.blockSignals(True)
         self.annotation_filter.setCurrentIndex(0)
         self.type_filter.setCurrentIndex(0)
+        self.label_filter.setCurrentIndex(0)
         self.annotation_filter.blockSignals(False)
         self.type_filter.blockSignals(False)
+        self.label_filter.blockSignals(False)
 
     def _on_filters_changed(self):
         self.filters_changed.emit(
             self.annotation_filter.currentText(),
-            self.type_filter.currentText(),
+            self.type_filter.currentData() or "全部",
+            self.label_filter.currentData() or "全部",
         )
     
     def _create_placeholder_pixmap(self) -> QPixmap:
@@ -2160,7 +2216,9 @@ class DatasetPage(QWidget):
         
         # 更新筛选项与图片列表（set_images -> _show_page -> page_changed -> _load_page_thumbnails）
         image_types = sorted({info.image_type for info in self.image_infos if info.image_type})
+        labels = sorted(stats.label_counts.keys(), key=str.casefold)
         self.image_list_panel.set_type_options(image_types)
+        self.image_list_panel.set_label_options(labels)
         self._apply_filters()
     
     def _load_page_thumbnails(self, page_paths: List[str]):
@@ -2218,25 +2276,26 @@ class DatasetPage(QWidget):
                 f"{self.current_project.name}: 筛选后 {total} 张，第 {page}/{pages} 页"
             )
 
-    def _on_filters_changed(self, annotation_filter: str, image_type_filter: str):
+    def _on_filters_changed(
+        self,
+        annotation_filter: str,
+        image_type_filter: str,
+        label_filter: str,
+    ):
         """筛选变化"""
-        del annotation_filter, image_type_filter
+        del annotation_filter, image_type_filter, label_filter
         self._apply_filters()
 
     def _apply_filters(self):
         """根据筛选条件刷新列表"""
         annotation_filter = self.image_list_panel.annotation_filter.currentText()
-        type_filter = self.image_list_panel.type_filter.currentText().lower()
+        type_filter = self.image_list_panel.type_filter.currentData() or "全部"
+        label_filter = self.image_list_panel.label_filter.currentData() or "全部"
 
         filtered = []
         for info in self.image_infos:
-            if annotation_filter == "已标注" and not info.is_annotated:
-                continue
-            if annotation_filter == "未标注" and info.is_annotated:
-                continue
-            if type_filter != "全部" and info.image_type != type_filter:
-                continue
-            filtered.append(info.path)
+            if _matches_image_filters(info, annotation_filter, type_filter, label_filter):
+                filtered.append(info.path)
 
         self.filtered_image_paths = filtered
         self.image_list_panel.set_images(self.filtered_image_paths)
