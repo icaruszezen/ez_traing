@@ -1,4 +1,4 @@
-﻿"""
+"""
 批量标注页面
 功能：多选图片，对第一张标注后将标注应用到所有分辨率一致的图片
 """
@@ -638,6 +638,20 @@ class BatchImageListPanel(CardWidget):
         self.image_list.blockSignals(False)
         self._update_count_label()
 
+    def total_count(self) -> int:
+        """当前列表中的图片总数。"""
+        return len(self._all_paths)
+
+    def path_index_one_based(self, path: str) -> Optional[int]:
+        """路径在列表中的序号（1-based），不在列表中为 None。"""
+        if not path:
+            return None
+        target = self._norm(path)
+        for i, p in enumerate(self._all_paths):
+            if self._norm(p) == target:
+                return i + 1
+        return None
+
 
 class BatchAnnotationPage(QWidget):
     """批量标注页面"""
@@ -699,6 +713,8 @@ class BatchAnnotationPage(QWidget):
         self.status_label = CaptionLabel("就绪")
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
+        self.position_label = CaptionLabel("-- / --")
+        status_layout.addWidget(self.position_label)
         main_layout.addLayout(status_layout)
 
         # 快捷键
@@ -763,6 +779,7 @@ class BatchAnnotationPage(QWidget):
             self.status_label.setText("未选择图片")
 
         self._sync_dataset_combo_to_directory(directory)
+        self._update_image_position_label()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -847,6 +864,7 @@ class BatchAnnotationPage(QWidget):
     def _on_scan_finished(self, _project_id: str, paths: List[str], _error: str, _elapsed: float):
         self.image_panel.set_images(paths)
         self.status_label.setText(f"已加载 {len(paths)} 张图片")
+        self._update_image_position_label()
 
         if paths:
             self._load_first_image(paths[0], self._current_directory)
@@ -895,6 +913,8 @@ class BatchAnnotationPage(QWidget):
     def _after_annotation_load(self):
         """AnnotationWindow 加载完一张图片后，同步右侧面板"""
         if self._syncing_selection:
+            # 从右侧列表点选时 _on_first_image_changed 会置位同步标志，此处仍须刷新底部位数
+            self._update_image_position_label()
             return
         file_path = getattr(self._annotation_window, "file_path", None)
         if not file_path:
@@ -911,6 +931,26 @@ class BatchAnnotationPage(QWidget):
                 info += f" | 已有 {baseline_count} 个标注"
             self.image_panel.ref_info_label.setText(info)
         self._syncing_selection = False
+        self._update_image_position_label()
+
+    def _update_image_position_label(self) -> None:
+        """底部显示当前图在列表中的位置（1-based / 总数）。"""
+        total = self.image_panel.total_count()
+        if total == 0:
+            self.position_label.setText("-- / --")
+            return
+        if not self._annotation_window:
+            self.position_label.setText(f"-- / {total}")
+            return
+        fp = getattr(self._annotation_window, "file_path", None)
+        if not fp:
+            self.position_label.setText(f"-- / {total}")
+            return
+        idx = self.image_panel.path_index_one_based(fp)
+        if idx is None:
+            self.position_label.setText(f"-- / {total}")
+        else:
+            self.position_label.setText(f"{idx} / {total}")
 
     # ------------------------------------------------------------------
     # Batch apply
